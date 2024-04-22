@@ -65,7 +65,7 @@ def run_inference(args):
     """
     # Initialize the model
     model_name = get_model_name_from_path(args.model_path)
-    tokenizer, model, image_processor, context_len = load_pretrained_model(args.model_path, args.model_base, model_name, args.model_max_length)
+    tokenizer, model, image_processor, context_len = load_pretrained_model(args.model_path, args.model_base, model_name, args.model_max_length, load_4bit=True)
 
     # Load both ground truth file containing questions and answers
     with open(args.gt_file_question) as file:
@@ -99,7 +99,7 @@ def run_inference(args):
 
         # Load the video file
         for fmt in video_formats:  # Added this line
-            temp_path = os.path.join(args.video_dir, f"v_{video_name}{fmt}")
+            temp_path = os.path.join(args.video_dir, f"{video_name}{fmt}")
             if os.path.exists(temp_path):
                 video_path = temp_path
                 break
@@ -136,8 +136,8 @@ def run_inference(args):
             output_ids = model.generate(
                 input_ids,
                 images=video,
-                do_sample=True,
-                temperature=0.2,
+                do_sample=False,
+                temperature=0.1,
                 max_new_tokens=1024,
                 use_cache=True,
                 stopping_criteria=[stopping_criteria])

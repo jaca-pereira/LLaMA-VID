@@ -19,6 +19,8 @@
 from abc import ABC, abstractmethod
 import os
 import json
+
+import matplotlib.pyplot as plt
 import numpy as np
 
 import torch
@@ -153,6 +155,7 @@ class LLaMAVIDMetaModel:
             else:
                 model_save_path = model_args.model_path
             model_idx_path = getattr(model_args, 'model_path', model_save_path)
+            model_idx_path = "/home/socialab/Desktop/LLaMA-VID/work_dirs/llama-vid/llama-vid-13b-full-224-video-fps-1/snapshots/3ce9a9e67e439a56ca3ac1aabdd4724afd833f82"
             weight_file = json.load(open(os.path.join(model_idx_path, 'pytorch_model.bin.index.json'), 'r'))['weight_map']
             model_path = set([weight_file[_key] for _key in weight_file if any([_module in _key for _module in trainable_module])])
             att_projector_weights = {}
@@ -256,10 +259,10 @@ class LLaMAVIDMetaForCausalLM(ABC):
         image_features = self.vlm_attention(image_features, 
                                             prompts=prompts, 
                                             image_counts=image_counts,
-                                            long_video=long_video)
+                                            long_video=long_video, images=images)
         return image_features
 
-    def vlm_attention(self, image_features, prompts=None, image_counts=None, long_video=False):        
+    def vlm_attention(self, image_features, prompts=None, image_counts=None, long_video=False, images=None):
         img_feat_lst = []
         if image_counts is None:
             assert len(image_features) == len(prompts), f"Size mismatch! image_features: {len(image_features)}, prompts: {len(prompts)}"
@@ -360,7 +363,7 @@ class LLaMAVIDMetaForCausalLM(ABC):
                 raise ValueError(f'Unexpected bert type: {self.config.bert_type}')
             
             text_q = self.get_model().vlm_att_projector(mm_output)
-            final_token = self.token_generation(text_q, img_feat_prompt, long_video=long_video)
+            final_token = self.token_generation(text_q, img_feat_prompt, long_video=long_video, images= images)
 
             if image_counts is not None:
                 # shape: [prompt_num, frame_num*image_shape, feat_dim]
@@ -370,13 +373,83 @@ class LLaMAVIDMetaForCausalLM(ABC):
 
         return img_feat_lst
 
-    def token_generation(self, text_q, vis_embed, long_video=False):
+    def top_patches(self, ctx_embed, top_k=20):
+        # Ensure the input tensor is a PyTorch tensor
+        assert isinstance(ctx_embed, torch.Tensor), "Input must be a PyTorch tensor"
+
+        # Ensure the input tensor has the correct number of dimensions
+        assert ctx_embed.dim() == 3, "Input tensor must be 3-dimensional"
+
+        # Get the number of frames, queries, and patches
+        nr_frames, nr_queries, nr_patches = ctx_embed.shape
+
+        # We are only interested in the first 2 queries of each frame
+        ctx_embed = ctx_embed[:, :2, :]
+
+        # Calculate the top 20 patches for each of the first 2 queries of each frame
+        top_values, top_indices = torch.topk(ctx_embed, top_k, dim=2)
+
+        return top_values, top_indices
+
+    def plot_top_patches(self, top_indices, images, patch_size=14):
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as patches
+        # Ensure the input tensors are PyTorch tensors
+        assert isinstance(top_indices, torch.Tensor), "Input top_indices must be a PyTorch tensor"
+        assert isinstance(images, torch.Tensor), "Input images must be a PyTorch tensor"
+
+        # Ensure the input tensors have the correct number of dimensions
+        assert top_indices.dim() == 3, "Input top_indices tensor must be 3-dimensional"
+        assert images.dim() == 4, "Input images tensor must be 4-dimensional"
+
+        # Get the number of frames, channels, width, and height
+        nr_frames, nr_channels, width, height = images.shape
+
+        # Calculate the number of patches in width and height
+        nr_patches_width = width // patch_size
+        nr_patches_height = height // patch_size
+
+        # Iterate over each frame
+        for i in range(nr_frames):
+            # Create a new figure for each frame
+            fig, ax = plt.subplots(1)
+
+            # Display the image
+            ax.imshow(images[i].permute(1, 2, 0).cpu().numpy().astype('float32'))
+            plt.savefig(f"/home/socialab/Desktop/LLaMA-VID/run/images/frame_{i}.png")
+            # Iterate over each query
+            for j in range(top_indices.shape[1]):
+                # Iterate over each patch index
+                for k in range(top_indices.shape[2]):
+                    # Get the patch index
+                    patch_index = top_indices[i, j, k].cpu().item()
+
+                    # Calculate the top left corner of the patch in the image
+                    start_x = (patch_index % nr_patches_width) * patch_size
+                    start_y = (patch_index // nr_patches_width) * patch_size
+
+                    # Create a Rectangle patch
+                    rect = patches.Rectangle((start_x, start_y), patch_size, patch_size, linewidth=1, edgecolor='r',
+                                             facecolor='none')
+
+                    # Add the patch to the Axes
+                    ax.add_patch(rect)
+
+                plt.savefig(f"/home/socialab/Desktop/LLaMA-VID/run/images/frame_{i}_query_{j}.png")
+                fig, ax = plt.subplots(1)
+                # Display the image
+                ax.imshow(images[i].permute(1, 2, 0).cpu().numpy().astype('float32'))
+    def token_generation(self, text_q, vis_embed, long_video=False, images=None):
         ctx_embed = self.get_model().vlm_att_key_projector(vis_embed)
         # Key part 1: calculate context-related embedding
         ctx_embed = text_q @ ctx_embed.transpose(-1,-2) 
         ctx_embed = ctx_embed / (vis_embed.shape[-1] ** 0.5)
+        if images is not None:
+            top_values, top_indices = self.top_patches(ctx_embed, top_k=20)
+            self.plot_top_patches(top_indices, images)
         if not long_video:
-            ctx_embed = (ctx_embed.softmax(-1) @ vis_embed).mean(1)
+            ctx_embed = ctx_embed.softmax(-1) @ vis_embed
+            ctx_embed = ctx_embed.mean(1)
         else:
             block_size = 64
             outputs = []
