@@ -39,3 +39,5 @@ serve_images/
 run/images/
 
 .cache/
+
+data/
