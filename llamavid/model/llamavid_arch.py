@@ -260,7 +260,7 @@ class LLaMAVIDMetaForCausalLM(ABC):
         image_features = self.vlm_attention(image_features, 
                                             prompts=prompts, 
                                             image_counts=image_counts,
-                                            long_video=long_video, images=images)
+                                            long_video=long_video, images=None) #IMPORTANT: images should be None unless you want to plot top patches
         return image_features
 
     def vlm_attention(self, image_features, prompts=None, image_counts=None, long_video=False, images=None):
@@ -385,7 +385,7 @@ class LLaMAVIDMetaForCausalLM(ABC):
         #ctx_embed_first_2 = ctx_embed[:, :, :]
 
         # Calculate the top 20 patches for each of the first 2 queries of each frame
-        _, top_indices = torch.topk(torch.abs(ctx_embed), top_k, dim=2)
+        _, top_indices = torch.topk(ctx_embed, top_k, dim=2)
 
         return top_indices
 
