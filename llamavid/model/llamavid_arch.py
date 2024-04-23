@@ -155,8 +155,8 @@ class LLaMAVIDMetaModel:
             else:
                 model_save_path = model_args.model_path
             model_idx_path = getattr(model_args, 'model_path', model_save_path)
-            self.project_root_dir = os.getcwd()
-            model_idx_path = os.path.join(self.project_root_dir, "work_dirs/llama-vid/llama-vid-13b-full-224-video-fps-1/snapshots/3ce9a9e67e439a56ca3ac1aabdd4724afd833f82")
+            project_root_dir = os.getcwd()
+            model_idx_path = os.path.join(project_root_dir, "work_dirs/llama-vid/llama-vid-13b-full-224-video-fps-1/snapshots/3ce9a9e67e439a56ca3ac1aabdd4724afd833f82")
             weight_file = json.load(open(os.path.join(model_idx_path, 'pytorch_model.bin.index.json'), 'r'))['weight_map']
             model_path = set([weight_file[_key] for _key in weight_file if any([_module in _key for _module in trainable_module])])
             att_projector_weights = {}
@@ -385,7 +385,7 @@ class LLaMAVIDMetaForCausalLM(ABC):
         #ctx_embed_first_2 = ctx_embed[:, :, :]
 
         # Calculate the top 20 patches for each of the first 2 queries of each frame
-        _, top_indices = torch.topk(ctx_embed, top_k, dim=2)
+        _, top_indices = torch.topk(torch.abs(ctx_embed), top_k, dim=2)
 
         return top_indices
 
@@ -414,11 +414,12 @@ class LLaMAVIDMetaForCausalLM(ABC):
 
             # Display the image
             ax.imshow(images[i].permute(1, 2, 0).cpu().numpy().astype('float64'))
-            image_path = os.path.join(self.project_root_dir, f"run/images/frame_{i}.png")
+            project_root_dir = os.getcwd()
+            image_path = os.path.join(project_root_dir, f"run/images/frame_{i}.png")
             plt.savefig(image_path)
             # Iterate over each query
             for j in range(top_indices.shape[1]):
-                query_dir = os.path.join(self.project_root_dir, f"run/images/query_{j}")
+                query_dir = os.path.join(project_root_dir, f"run/images/query_{j}")
                 os.makedirs(query_dir, exist_ok=True)
                 # Iterate over each patch index
                 for k in range(top_indices.shape[2]):
