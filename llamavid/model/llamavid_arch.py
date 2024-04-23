@@ -155,7 +155,8 @@ class LLaMAVIDMetaModel:
             else:
                 model_save_path = model_args.model_path
             model_idx_path = getattr(model_args, 'model_path', model_save_path)
-            model_idx_path = "/home/socialab/Desktop/LLaMA-VID/work_dirs/llama-vid/llama-vid-13b-full-224-video-fps-1/snapshots/3ce9a9e67e439a56ca3ac1aabdd4724afd833f82"
+            self.project_root_dir = os.getcwd()
+            model_idx_path = os.path.join(self.project_root_dir, "work_dirs/llama-vid/llama-vid-13b-full-224-video-fps-1/snapshots/3ce9a9e67e439a56ca3ac1aabdd4724afd833f82")
             weight_file = json.load(open(os.path.join(model_idx_path, 'pytorch_model.bin.index.json'), 'r'))['weight_map']
             model_path = set([weight_file[_key] for _key in weight_file if any([_module in _key for _module in trainable_module])])
             att_projector_weights = {}
@@ -380,16 +381,13 @@ class LLaMAVIDMetaForCausalLM(ABC):
         # Ensure the input tensor has the correct number of dimensions
         assert ctx_embed.dim() == 3, "Input tensor must be 3-dimensional"
 
-        # Get the number of frames, queries, and patches
-        nr_frames, nr_queries, nr_patches = ctx_embed.shape
-
         # We are only interested in the first 2 queries of each frame
-        ctx_embed = ctx_embed[:, :2, :]
+        #ctx_embed_first_2 = ctx_embed[:, :, :]
 
         # Calculate the top 20 patches for each of the first 2 queries of each frame
-        top_values, top_indices = torch.topk(ctx_embed, top_k, dim=2)
+        _, top_indices = torch.topk(ctx_embed, top_k, dim=2)
 
-        return top_values, top_indices
+        return top_indices
 
     def plot_top_patches(self, top_indices, images, patch_size=14):
         import matplotlib.pyplot as plt
@@ -415,10 +413,13 @@ class LLaMAVIDMetaForCausalLM(ABC):
             fig, ax = plt.subplots(1)
 
             # Display the image
-            ax.imshow(images[i].permute(1, 2, 0).cpu().numpy().astype('float32'))
-            plt.savefig(f"/home/socialab/Desktop/LLaMA-VID/run/images/frame_{i}.png")
+            ax.imshow(images[i].permute(1, 2, 0).cpu().numpy().astype('float64'))
+            image_path = os.path.join(self.project_root_dir, f"run/images/frame_{i}.png")
+            plt.savefig(image_path)
             # Iterate over each query
             for j in range(top_indices.shape[1]):
+                query_dir = os.path.join(self.project_root_dir, f"run/images/query_{j}")
+                os.makedirs(query_dir, exist_ok=True)
                 # Iterate over each patch index
                 for k in range(top_indices.shape[2]):
                     # Get the patch index
@@ -426,7 +427,7 @@ class LLaMAVIDMetaForCausalLM(ABC):
 
                     # Calculate the top left corner of the patch in the image
                     start_x = (patch_index % nr_patches_width) * patch_size
-                    start_y = (patch_index // nr_patches_width) * patch_size
+                    start_y = (patch_index // nr_patches_height) * patch_size
 
                     # Create a Rectangle patch
                     rect = patches.Rectangle((start_x, start_y), patch_size, patch_size, linewidth=1, edgecolor='r',
@@ -435,17 +436,21 @@ class LLaMAVIDMetaForCausalLM(ABC):
                     # Add the patch to the Axes
                     ax.add_patch(rect)
 
-                plt.savefig(f"/home/socialab/Desktop/LLaMA-VID/run/images/frame_{i}_query_{j}.png")
+                plt.savefig(f"{query_dir}/frame_{i}.png")
+                ax.clear()
+                ax.axis("off")
+                ax.set_visible(False)
+                ax.remove()
                 fig, ax = plt.subplots(1)
                 # Display the image
-                ax.imshow(images[i].permute(1, 2, 0).cpu().numpy().astype('float32'))
+                ax.imshow(images[i].permute(1, 2, 0).cpu().numpy().astype('float64'))
     def token_generation(self, text_q, vis_embed, long_video=False, images=None):
         ctx_embed = self.get_model().vlm_att_key_projector(vis_embed)
         # Key part 1: calculate context-related embedding
-        ctx_embed = text_q @ ctx_embed.transpose(-1,-2) 
+        ctx_embed = text_q @ ctx_embed.transpose(-1, -2)
         ctx_embed = ctx_embed / (vis_embed.shape[-1] ** 0.5)
         if images is not None:
-            top_values, top_indices = self.top_patches(ctx_embed, top_k=20)
+            top_indices = self.top_patches(ctx_embed, top_k=20)
             self.plot_top_patches(top_indices, images)
         if not long_video:
             ctx_embed = ctx_embed.softmax(-1) @ vis_embed

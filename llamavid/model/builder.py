@@ -52,8 +52,11 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             mm_projector_weights = {k: v.to(torch.float16) for k, v in mm_projector_weights.items()}
             model.load_state_dict(mm_projector_weights, strict=False)
         else:
-            tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False, cache_dir= "/home/socialab/.cache/huggingface/hub/")
-            model = LlavaLlamaAttForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, cache_dir= "/home/socialab/.cache/huggingface/hub/", **kwargs)
+            # Get the home directory
+            home_dir = os.path.expanduser("~")
+            hf_dir = os.path.join(home_dir, ".cache/huggingface/hub/")
+            tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False, cache_dir=hf_dir)
+            model = LlavaLlamaAttForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, cache_dir=hf_dir, **kwargs)
 
     else:
         # Load language model
