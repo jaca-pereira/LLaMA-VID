@@ -19,6 +19,7 @@
 import os
 import copy
 import random
+import traceback
 from dataclasses import dataclass, field
 import json
 import logging
@@ -31,7 +32,8 @@ import torch
 
 import transformers
 
-from llamavid.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+from llamavid.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, \
+    DEFAULT_IM_END_TOKEN
 from torch.utils.data import Dataset
 from llamavid.train.llava_trainer import LLaVATrainer
 
@@ -41,6 +43,8 @@ from llava.mm_utils import tokenizer_image_token
 
 from PIL import Image
 from decord import VideoReader, cpu
+
+import subprocess as sp
 
 
 local_rank = None
@@ -59,7 +63,7 @@ class ModelArguments:
     tune_mm_mlp_adapter: bool = field(default=False)
     vision_tower: Optional[str] = field(default=None)
     image_processor: Optional[str] = field(default=None)
-    mm_vision_select_layer: Optional[int] = field(default=-1)   # default to the last layer
+    mm_vision_select_layer: Optional[int] = field(default=-1)  # default to the last layer
     pretrain_mm_mlp_adapter: Optional[str] = field(default=None)
     mm_projector_type: Optional[str] = field(default='linear')
     mm_use_im_start_end: bool = field(default=False)
@@ -98,7 +102,7 @@ class TrainingArguments(transformers.TrainingArguments):
         default=512,
         metadata={
             "help":
-            "Maximum sequence length. Sequences will be right padded (and possibly truncated)."
+                "Maximum sequence length. Sequences will be right padded (and possibly truncated)."
         },
     )
     double_quant: bool = field(
@@ -176,6 +180,7 @@ def get_mm_adapter_state_maybe_zero_3(named_params, keys_to_match):
     to_return = {k: maybe_zero_3(v, ignore_status=True).cpu() for k, v in to_return.items()}
     return to_return
 
+
 def find_all_linear_names(model):
     cls = torch.nn.Linear
     lora_module_names = set()
@@ -187,8 +192,7 @@ def find_all_linear_names(model):
             names = name.split('.')
             lora_module_names.add(names[0] if len(names) == 1 else names[-1])
 
-
-    if 'lm_head' in lora_module_names: # needed for 16-bit
+    if 'lm_head' in lora_module_names:  # needed for 16-bit
         lora_module_names.remove('lm_head')
     return list(lora_module_names)
 
@@ -234,9 +238,9 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
 
 
 def smart_tokenizer_and_embedding_resize(
-    special_tokens_dict: Dict,
-    tokenizer: transformers.PreTrainedTokenizer,
-    model: transformers.PreTrainedModel,
+        special_tokens_dict: Dict,
+        tokenizer: transformers.PreTrainedTokenizer,
+        model: transformers.PreTrainedModel,
 ):
     """Resize tokenizer and embedding.
 
@@ -292,7 +296,7 @@ def _mask_targets(target, tokenized_lens, speakers):
     target[:cur_idx] = IGNORE_INDEX
     for tokenized_len, speaker in zip(tokenized_lens, speakers):
         if speaker == "human":
-            target[cur_idx+2:cur_idx + tokenized_len] = IGNORE_INDEX
+            target[cur_idx + 2:cur_idx + tokenized_len] = IGNORE_INDEX
         cur_idx += tokenized_len
 
 
@@ -318,8 +322,8 @@ def _add_speaker_and_signal(header, source, get_conversation=True):
 
 
 def preprocess_multimodal(
-    sources: Sequence[str],
-    data_args: DataArguments
+        sources: Sequence[str],
+        data_args: DataArguments
 ) -> Dict:
     is_multimodal = data_args.is_multimodal
     if not is_multimodal:
@@ -332,7 +336,8 @@ def preprocess_multimodal(
                 sentence['value'] = DEFAULT_IMAGE_TOKEN + '\n' + sentence['value']
                 sentence['value'] = sentence['value'].strip()
                 if "mmtag" in conversation_lib.default_conversation.version:
-                    sentence['value'] = sentence['value'].replace(DEFAULT_IMAGE_TOKEN, '<Image>' + DEFAULT_IMAGE_TOKEN + '</Image>')
+                    sentence['value'] = sentence['value'].replace(DEFAULT_IMAGE_TOKEN,
+                                                                  '<Image>' + DEFAULT_IMAGE_TOKEN + '</Image>')
             replace_token = DEFAULT_IMAGE_TOKEN
             if data_args.mm_use_im_start_end:
                 replace_token = DEFAULT_IM_START_TOKEN + replace_token + DEFAULT_IM_END_TOKEN
@@ -342,9 +347,9 @@ def preprocess_multimodal(
 
 
 def preprocess_multimodal_movie(
-    sources: Sequence[str],
-    data_args: DataArguments,
-    video_inputs: str
+        sources: Sequence[str],
+        data_args: DataArguments,
+        video_inputs: str
 ) -> Dict:
     is_multimodal = data_args.is_multimodal
     if not is_multimodal:
@@ -363,9 +368,9 @@ def preprocess_multimodal_movie(
 
 
 def preprocess_llama_2(
-    sources,
-    tokenizer: transformers.PreTrainedTokenizer,
-    has_image: bool = False
+        sources,
+        tokenizer: transformers.PreTrainedTokenizer,
+        has_image: bool = False
 ) -> Dict:
     conv = conversation_lib.default_conversation.copy()
     roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
@@ -387,7 +392,8 @@ def preprocess_llama_2(
     # Tokenize conversations
 
     if has_image:
-        input_ids = torch.stack([tokenizer_image_token(prompt, tokenizer, return_tensors='pt') for prompt in conversations], dim=0)
+        input_ids = torch.stack(
+            [tokenizer_image_token(prompt, tokenizer, return_tensors='pt') for prompt in conversations], dim=0)
     else:
         input_ids = tokenizer(
             conversations,
@@ -425,7 +431,7 @@ def preprocess_llama_2(
                 round_len = len(tokenizer(rou).input_ids)
                 instruction_len = len(tokenizer(parts[0]).input_ids) - 2
 
-            target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
+            target[cur_len: cur_len + instruction_len] = IGNORE_INDEX
 
             cur_len += round_len
         target[cur_len:] = IGNORE_INDEX
@@ -445,9 +451,9 @@ def preprocess_llama_2(
 
 
 def preprocess_v1(
-    sources,
-    tokenizer: transformers.PreTrainedTokenizer,
-    has_image: bool = False
+        sources,
+        tokenizer: transformers.PreTrainedTokenizer,
+        has_image: bool = False
 ) -> Dict:
     conv = conversation_lib.default_conversation.copy()
     roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
@@ -469,7 +475,8 @@ def preprocess_v1(
     # Tokenize conversations
 
     if has_image:
-        input_ids = torch.stack([tokenizer_image_token(prompt, tokenizer, return_tensors='pt') for prompt in conversations], dim=0)
+        input_ids = torch.stack(
+            [tokenizer_image_token(prompt, tokenizer, return_tensors='pt') for prompt in conversations], dim=0)
     else:
         input_ids = tokenizer(
             conversations,
@@ -507,7 +514,7 @@ def preprocess_v1(
                 round_len = len(tokenizer(rou).input_ids)
                 instruction_len = len(tokenizer(parts[0]).input_ids) - 2
 
-            target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
+            target[cur_len: cur_len + instruction_len] = IGNORE_INDEX
 
             cur_len += round_len
         target[cur_len:] = IGNORE_INDEX
@@ -527,11 +534,11 @@ def preprocess_v1(
 
 
 def preprocess_imgsp_v1(
-    sources,
-    tokenizer: transformers.PreTrainedTokenizer,
-    has_image: bool = False,
-    img_token: str = '<image>',
-    refine_prompt: bool = False,
+        sources,
+        tokenizer: transformers.PreTrainedTokenizer,
+        has_image: bool = False,
+        img_token: str = '<image>',
+        refine_prompt: bool = False,
 ) -> Dict:
     conv = conversation_lib.default_conversation.copy()
     roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
@@ -540,18 +547,23 @@ def preprocess_imgsp_v1(
     conversations = []
     guided_prompt = []
     for i, source in enumerate(sources):
-        if roles[source[0]["from"]] != conv.roles[0]:
-            # Skip the first one if it is not from human
-            source = source[1:]
+        try:
+            if roles[source[0]["from"]] != conv.roles[0]:
+                # Skip the first one if it is not from human
+                source = source[1:]
+        except Exception as e:
+            traceback.print_exc()
+            print(source)
+
 
         conv.messages = []
         img_in_text = False
         for j, sentence in enumerate(source):
             role = roles[sentence["from"]]
             assert role == conv.roles[j % 2], f"{i}"
-            
+
             # add guided prompt
-            if role==conv.roles[0]:
+            if role == conv.roles[0]:
                 guided_sent = sentence["value"].replace(DEFAULT_IMAGE_TOKEN, '').replace('\n', '')
                 if refine_prompt:
                     # only keep the useful part of the prompt
@@ -565,13 +577,13 @@ def preprocess_imgsp_v1(
             if img_token in sentence["value"]:
                 img_in_text = True
             # add image token to all sentence if multimoal input
-            if role==conv.roles[0] and img_in_text and img_token not in sentence["value"]:
+            if role == conv.roles[0] and img_in_text and img_token not in sentence["value"]:
                 # randomly add image token to the beginning or end of the sentence
-                if random.randint(0,1)==0:
+                if random.randint(0, 1) == 0:
                     img_conv = img_token + '\n' + sentence["value"]
                 else:
                     img_conv = sentence["value"] + '\n' + img_token
-                
+
                 conv.append_message(role, img_conv)
             else:
                 conv.append_message(role, sentence["value"])
@@ -579,7 +591,8 @@ def preprocess_imgsp_v1(
 
     # Tokenize conversations
     if has_image:
-        input_ids = torch.stack([tokenizer_image_token(prompt, tokenizer, return_tensors='pt') for prompt in conversations], dim=0)
+        input_ids = torch.stack(
+            [tokenizer_image_token(prompt, tokenizer, return_tensors='pt') for prompt in conversations], dim=0)
     else:
         input_ids = tokenizer(
             conversations,
@@ -617,7 +630,7 @@ def preprocess_imgsp_v1(
                 round_len = len(tokenizer(rou).input_ids)
                 instruction_len = len(tokenizer(parts[0]).input_ids) - 2
 
-            target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
+            target[cur_len: cur_len + instruction_len] = IGNORE_INDEX
 
             cur_len += round_len
         target[cur_len:] = IGNORE_INDEX
@@ -636,9 +649,10 @@ def preprocess_imgsp_v1(
         prompt=guided_prompt,
     )
 
+
 def preprocess_mpt(
-    sources,
-    tokenizer: transformers.PreTrainedTokenizer,
+        sources,
+        tokenizer: transformers.PreTrainedTokenizer,
 ) -> Dict:
     conv = conversation_lib.default_conversation.copy()
     roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
@@ -658,7 +672,8 @@ def preprocess_mpt(
         conversations.append(conv.get_prompt())
 
     # Tokenize conversations
-    input_ids = torch.stack([tokenizer_image_token(prompt, tokenizer, return_tensors='pt') for prompt in conversations], dim=0)
+    input_ids = torch.stack([tokenizer_image_token(prompt, tokenizer, return_tensors='pt') for prompt in conversations],
+                            dim=0)
     targets = input_ids.clone()
     assert conv.sep_style == conversation_lib.SeparatorStyle.MPT
 
@@ -668,9 +683,9 @@ def preprocess_mpt(
         total_len = int(target.ne(tokenizer.pad_token_id).sum())
 
         rounds = conversation.split(conv.sep)
-        re_rounds = [conv.sep.join(rounds[:3])] # system + user + gpt
+        re_rounds = [conv.sep.join(rounds[:3])]  # system + user + gpt
         for conv_idx in range(3, len(rounds), 2):
-            re_rounds.append(conv.sep.join(rounds[conv_idx:conv_idx+2]))    # user + gpt
+            re_rounds.append(conv.sep.join(rounds[conv_idx:conv_idx + 2]))  # user + gpt
         cur_len = 0
         target[:cur_len] = IGNORE_INDEX
         for i, rou in enumerate(re_rounds):
@@ -683,7 +698,7 @@ def preprocess_mpt(
             parts[0] += sep
             round_len = len(tokenizer_image_token(rou, tokenizer)) + len(tokenizer_image_token(conv.sep, tokenizer))
             instruction_len = len(tokenizer_image_token(parts[0], tokenizer))
-            target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
+            target[cur_len: cur_len + instruction_len] = IGNORE_INDEX
 
             cur_len += round_len
         target[cur_len:] = IGNORE_INDEX
@@ -703,8 +718,8 @@ def preprocess_mpt(
 
 
 def preprocess_plain(
-    sources: Sequence[str],
-    tokenizer: transformers.PreTrainedTokenizer,
+        sources: Sequence[str],
+        tokenizer: transformers.PreTrainedTokenizer,
 ) -> Dict:
     # add end signal and concatenate together
     conversations = []
@@ -723,10 +738,11 @@ def preprocess_plain(
 
     return dict(input_ids=input_ids, labels=targets)
 
+
 def preprocess_plain_guided(
-    sources: Sequence[str],
-    tokenizer: transformers.PreTrainedTokenizer,
-    prompt: str = None,
+        sources: Sequence[str],
+        tokenizer: transformers.PreTrainedTokenizer,
+        prompt: str = None,
 ) -> Dict:
     # add end signal and concatenate together
     guided_prompt = []
@@ -747,12 +763,13 @@ def preprocess_plain_guided(
 
     return dict(input_ids=input_ids, labels=targets, prompt=guided_prompt)
 
+
 def preprocess(
-    sources: Sequence[str],
-    tokenizer: transformers.PreTrainedTokenizer,
-    has_image: bool = False,
-    prompt: str = None,
-    refine_prompt: bool = False,
+        sources: Sequence[str],
+        tokenizer: transformers.PreTrainedTokenizer,
+        has_image: bool = False,
+        prompt: str = None,
+        refine_prompt: bool = False,
 ) -> Dict:
     """
     Given a list of sources, each is a conversation list. This transform:
@@ -779,6 +796,7 @@ def preprocess(
         header = f"{conversation_lib.default_conversation.system}\n\n"
         conversation = _add_speaker_and_signal(header, source)
         conversations.append(conversation)
+
     # tokenize conversations
     def get_tokenize_len(prompts):
         return [len(tokenizer_image_token(prompt, tokenizer)) for prompt in prompts]
@@ -799,6 +817,16 @@ def preprocess(
         _mask_targets(target, tokenized_lens, speakers)
 
     return dict(input_ids=input_ids, labels=targets)
+
+
+def get_gpu_memory_usage():
+    command = "nvidia-smi --query-gpu=memory.free --format=csv"
+    memory_free_info = sp.check_output(command.split()).decode('ascii').split('\n')[:-1][1:]
+    memory_free_values = [int(x.split()[0]) for i, x in enumerate(memory_free_info)]
+    command = "nvidia-smi --query-gpu=memory.used --format=csv"
+    memory_used_info = sp.check_output(command.split()).decode('ascii').split('\n')[:-1][1:]
+    memory_used_values = [int(x.split()[0]) for i, x in enumerate(memory_used_info)]
+    return memory_free_values, memory_used_values
 
 
 class LazySupervisedDataset(Dataset):
@@ -848,7 +876,7 @@ class LazySupervisedDataset(Dataset):
                     image_file = self.list_data_dict[i]['image']
                     image_folder = self.data_args.image_folder
                     processor = self.data_args.image_processor
-                    
+
                     # convert image type for OCR VQA dataset
                     if image_file is not None:
                         if 'ocr' in image_file:
@@ -856,10 +884,10 @@ class LazySupervisedDataset(Dataset):
                                 image_file = image_file.replace(".jpg", ".png")
 
                         # convert image for VG dataset
-                        elif 'VG_100K' in image_file:
-                            image_file = image_file.replace('VG_100K_2', 'images')
-                            image_file = image_file.replace('VG_100K', 'images')
-                    
+                        #elif 'VG_100K' in image_file:
+                        #    image_file = image_file.replace('VG_100K_2', 'images')
+                        #    image_file = image_file.replace('VG_100K', 'images')
+
                     image = Image.open(os.path.join(image_folder, image_file)).convert('RGB')
                     if self.data_args.image_aspect_ratio == 'pad':
                         def expand2square(pil_img, background_color):
@@ -874,7 +902,8 @@ class LazySupervisedDataset(Dataset):
                                 result = Image.new(pil_img.mode, (height, height), background_color)
                                 result.paste(pil_img, ((height - width) // 2, 0))
                                 return result
-                        image = expand2square(image, tuple(int(x*255) for x in processor.image_mean))
+
+                        image = expand2square(image, tuple(int(x * 255) for x in processor.image_mean))
                         image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
                     else:
                         image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
@@ -887,21 +916,30 @@ class LazySupervisedDataset(Dataset):
                     video_file = os.path.join(video_folder, video_file)
                     suffix = video_file.split('.')[-1]
                     if not os.path.exists(video_file):
-                        print('File {} not exist!'.format(video_file))
-                    
+                        # Load the video file
+                        video_formats = ['.mp4', '.avi', '.mov', '.mkv', '.pkl']
+                        for fmt in video_formats:  # Added this line
+                            temp_path = f"{video_file.split('.')[0]}{fmt}"
+                            if os.path.exists(temp_path):
+                                video_file = temp_path
+                                print("Loading video file: ", video_file)
+                                break
+                        else:
+                            print('File {} not exist!'.format(video_file.split('.')[0]))
+
                     if suffix == 'pkl':
                         video_info = pickle.load(open(video_file, 'rb'))
                         image = torch.from_numpy(video_info['feats'][:, 1:])
                         input_prompt = video_info['inputs'].replace('...', '')
                         # replace the default image token with multiple tokens
-                        input_prompt = input_prompt.replace(DEFAULT_IMAGE_TOKEN, 
+                        input_prompt = input_prompt.replace(DEFAULT_IMAGE_TOKEN,
                                                             DEFAULT_IMAGE_TOKEN * self.data_args.video_token)
                         sources, query_prompt = preprocess_multimodal_movie(
                             copy.deepcopy([e["conversations"] for e in sources]),
                             self.data_args, input_prompt)
                     else:
                         vr = VideoReader(video_file, ctx=cpu(0))
-                        sample_fps = round(vr.get_avg_fps()/self.data_args.video_fps)
+                        sample_fps = round(vr.get_avg_fps() / self.data_args.video_fps)
                         frame_idx = [i for i in range(0, len(vr), sample_fps)]
                         video = vr.get_batch(frame_idx).asnumpy()
                         processor = self.data_args.image_processor
@@ -911,13 +949,13 @@ class LazySupervisedDataset(Dataset):
                             self.data_args)
                 else:
                     sources = copy.deepcopy([e["conversations"] for e in sources])
-                
+
                 break
-            except:
+            except Exception as e:
+                traceback.print_exc()
                 attempt += 1
                 print(f"Error in loading {i}, retrying...")
-                i = random.randint(0, len(self.list_data_dict)-1)
-                
+                i = random.randint(0, len(self.list_data_dict) - 1)
 
         has_image = ('image' in self.list_data_dict[i]) or ('video' in self.list_data_dict[i])
         data_dict = preprocess(
@@ -926,12 +964,12 @@ class LazySupervisedDataset(Dataset):
             has_image=has_image,
             prompt=self.data_args.input_prompt,
             refine_prompt=self.data_args.refine_prompt)
-        
+
         if 'prompt' in data_dict:
             prompt = data_dict['prompt']
         else:
             prompt = None
-        
+
         if suffix == 'pkl':
             prompt = [query_prompt]
 
@@ -948,11 +986,11 @@ class LazySupervisedDataset(Dataset):
             # image does not exist in the data, but the model is multimodal
             crop_size = self.data_args.image_processor.crop_size
             data_dict['image'] = torch.zeros(3, crop_size['height'], crop_size['width'])
-        
+
         # prompt exist in the data
         if prompt is not None:
             data_dict['prompt'] = prompt
-        
+
         return data_dict
 
 
@@ -997,8 +1035,8 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
                                 data_args) -> Dict:
     """Make dataset and collator for supervised fine-tuning."""
     train_dataset = LazySupervisedDataset(tokenizer=tokenizer,
-                                data_path=data_args.data_path,
-                                data_args=data_args)
+                                          data_path=data_args.data_path,
+                                          data_args=data_args)
     data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
     return dict(train_dataset=train_dataset,
                 eval_dataset=None,
@@ -1014,7 +1052,8 @@ def train():
     local_rank = training_args.local_rank
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
     bnb_model_from_pretrained_args = dict(
-        torch_dtype=(torch.float32 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32)),
+        torch_dtype=(
+            torch.float32 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32)),
     )
     if training_args.bits in [4, 8]:
         from transformers import BitsAndBytesConfig
@@ -1029,7 +1068,7 @@ def train():
                 llm_int8_has_fp16_weight=False,
                 bnb_4bit_compute_dtype=compute_dtype,
                 bnb_4bit_use_double_quant=training_args.double_quant,
-                bnb_4bit_quant_type=training_args.quant_type # {'fp4', 'nf4'}
+                bnb_4bit_quant_type=training_args.quant_type  # {'fp4', 'nf4'}
             )
         ))
 
@@ -1067,7 +1106,8 @@ def train():
 
     if training_args.bits in [4, 8]:
         from peft import prepare_model_for_kbit_training
-        model.config.torch_dtype=(torch.float32 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
+        model.config.torch_dtype = (
+            torch.float32 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=training_args.gradient_checkpointing)
 
     if training_args.gradient_checkpointing:
@@ -1076,6 +1116,7 @@ def train():
         else:
             def make_inputs_require_grad(module, input, output):
                 output.requires_grad_(True)
+
             model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
 
     if training_args.lora_enable:
@@ -1134,7 +1175,7 @@ def train():
             fsdp=training_args.fsdp,
             max_token=training_args.model_max_length
         )
-        
+
         vision_tower = model.get_vision_tower()
         vision_tower.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
 
@@ -1182,9 +1223,9 @@ def train():
     data_module = make_supervised_data_module(tokenizer=tokenizer,
                                               data_args=data_args)
     trainer = LLaVATrainer(model=model,
-                    tokenizer=tokenizer,
-                    args=training_args,
-                    **data_module)
+                           tokenizer=tokenizer,
+                           args=training_args,
+                           **data_module)
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         trainer.train(resume_from_checkpoint=True)

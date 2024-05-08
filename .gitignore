@@ -41,3 +41,9 @@ run/images/
 .cache/
 
 data/
+
+images
+logs
+run
+wandb
+./~

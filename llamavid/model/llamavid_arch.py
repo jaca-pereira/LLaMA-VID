@@ -270,10 +270,10 @@ class LLaMAVIDMetaForCausalLM(ABC):
         else:
             assert len(prompts) == len(image_counts), f"Size mismatch! prompts: {len(prompts)}, image_counts: {len(image_counts)}"
         image_atts = torch.ones(image_features.size()[:-1], dtype=torch.long).to(image_features.device)    
-
+        #vector with ones, shape of image features minus hidden dimension
         total_count = 0
         # calculate each image feat according to the prompt
-        for _idx in range(len(prompts)):
+        for _idx in range(len(prompts)): # for each text prompt
             assert isinstance(prompts[_idx], list), f"Prompt should be a list, but got {type(prompts[_idx])}"
             input_token = self.get_model().vlm_att_tokenlizer(
                 prompts[_idx], 
@@ -282,7 +282,7 @@ class LLaMAVIDMetaForCausalLM(ABC):
                 max_length=256,
                 return_tensors="pt"
                 ).to(image_features.device)
-
+            # input_token is BERT tokenizer tokens for inputting to qformer
             input_ids = input_token.input_ids
             attention_masks = input_token.attention_mask
             
@@ -292,17 +292,17 @@ class LLaMAVIDMetaForCausalLM(ABC):
             else:
                 # shape: [prompt_num*frame_num, image_shape, feat_dim]
                 img_feat_prompt = image_features[total_count:total_count+image_counts[_idx]]
-                img_feat_prompt = img_feat_prompt[None].expand(len(prompts[_idx]), -1, -1, -1).flatten(0,1)
+                img_feat_prompt = img_feat_prompt[None].expand(len(prompts[_idx]), -1, -1, -1).flatten(0,1) #equal to image_features if just one video
                 img_att_prompt = image_atts[total_count:total_count+image_counts[_idx]]
-                img_att_prompt = img_att_prompt[None].expand(len(prompts[_idx]), -1, -1).flatten(0,1)
-                input_ids = input_ids[:,None].expand(-1, image_counts[_idx], -1).flatten(0,1)
-                attention_masks = attention_masks[:,None].expand(-1, image_counts[_idx], -1).flatten(0,1)
+                img_att_prompt = img_att_prompt[None].expand(len(prompts[_idx]), -1, -1).flatten(0,1) #equal to image_atts if just one video
+                input_ids = input_ids[:,None].expand(-1, image_counts[_idx], -1).flatten(0,1) #same here
+                attention_masks = attention_masks[:,None].expand(-1, image_counts[_idx], -1).flatten(0,1) #same here
                 total_count += image_counts[_idx]
             
             if "pretrain" in self.config.bert_type and self.get_model().vlm_att_bert_proj is not None:
                 bert_feat = self.get_model().vlm_att_bert_proj(img_feat_prompt)
             else:
-                bert_feat = img_feat_prompt.clone()
+                bert_feat = img_feat_prompt.clone() #with qformer is the same as img_feats
 
             # remove cls embedding
             if self.config.mm_vision_select_feature == 'patch':
@@ -310,9 +310,9 @@ class LLaMAVIDMetaForCausalLM(ABC):
                     img_feat_prompt = img_feat_prompt[:, 1:]
 
             if "qformer" in self.config.bert_type:
-                query_tokens = self.get_model().vlm_att_query.expand(bert_feat.shape[0], -1, -1)
+                query_tokens = self.get_model().vlm_att_query.expand(bert_feat.shape[0], -1, -1) #expand to correct number of frames from video
                 query_atts = torch.cat([torch.ones(query_tokens.size()[:-1], dtype=torch.long).to(bert_feat.device), 
-                                        attention_masks],dim=1)
+                                        attention_masks],dim=1) #attention masks for qformer input
                 
                 if 'pretrain' in self.config.bert_type:
                     mm_img_in = self.get_model().vlm_att_ln(bert_feat)
@@ -345,7 +345,7 @@ class LLaMAVIDMetaForCausalLM(ABC):
                         encoder_attention_mask=img_att_prompt,
                         return_dict=True,
                     )
-                    mm_output = mm_output.last_hidden_state[:,:query_tokens.shape[1]]
+                    mm_output = mm_output.last_hidden_state[:,:query_tokens.shape[1]] #ignore actual text output tokens and get only image related tokens. left side of qformer
                 
             elif "raw" in self.config.bert_type:
                 if self.config.mm_vision_select_feature == 'patch' and bert_feat.shape[1]%2 == 1:
@@ -363,7 +363,7 @@ class LLaMAVIDMetaForCausalLM(ABC):
             else:
                 raise ValueError(f'Unexpected bert type: {self.config.bert_type}')
             
-            text_q = self.get_model().vlm_att_projector(mm_output)
+            text_q = self.get_model().vlm_att_projector(mm_output) #linear projector from context attnetion. Not projection for LLM
             final_token = self.token_generation(text_q, img_feat_prompt, long_video=long_video, images= images)
 
             if image_counts is not None:
@@ -381,15 +381,21 @@ class LLaMAVIDMetaForCausalLM(ABC):
         # Ensure the input tensor has the correct number of dimensions
         assert ctx_embed.dim() == 3, "Input tensor must be 3-dimensional"
 
-        # We are only interested in the first 2 queries of each frame
-        #ctx_embed_first_2 = ctx_embed[:, :, :]
+        #calculate the mean token importance for all queries
+        ctx_embed = ctx_embed.mean(dim=-2)
 
-        # Calculate the top 20 patches for each of the first 2 queries of each frame
-        _, top_indices = torch.topk(ctx_embed, top_k, dim=2)
+        # Calculate the top 20 patches
+        _, top_indices = torch.topk(ctx_embed, top_k, dim=-1)
 
-        return top_indices
+        #Calculate the mean token importance for each frame
+        ctx_embed = ctx_embed.mean(-1)
 
-    def plot_top_patches(self, top_indices, images, patch_size=14):
+        # Calculate the top 5 frames
+        _, top_indices_frames = torch.topk(ctx_embed, top_k, dim=-1)
+
+        return top_indices, top_indices_frames
+
+    def plot_top_patches(self, top_indices, top_indices_frames, images, patch_size=14):
         import matplotlib.pyplot as plt
         import matplotlib.patches as patches
         # Ensure the input tensors are PyTorch tensors
@@ -397,7 +403,7 @@ class LLaMAVIDMetaForCausalLM(ABC):
         assert isinstance(images, torch.Tensor), "Input images must be a PyTorch tensor"
 
         # Ensure the input tensors have the correct number of dimensions
-        assert top_indices.dim() == 3, "Input top_indices tensor must be 3-dimensional"
+        assert top_indices.dim() == 2, "Input top_indices tensor must be 2-dimensional"
         assert images.dim() == 4, "Input images tensor must be 4-dimensional"
 
         # Get the number of frames, channels, width, and height
@@ -407,52 +413,50 @@ class LLaMAVIDMetaForCausalLM(ABC):
         nr_patches_width = width // patch_size
         nr_patches_height = height // patch_size
 
+        project_root_dir = os.getcwd()
+        frame_dir = os.path.join(project_root_dir, f"run/images/")
+        os.makedirs(frame_dir, exist_ok=True)
+
         # Iterate over each frame
-        for i in range(nr_frames):
+        for i in top_indices_frames:
             # Create a new figure for each frame
             fig, ax = plt.subplots(1)
 
             # Display the image
             ax.imshow(images[i].permute(1, 2, 0).cpu().numpy().astype('float64'))
-            project_root_dir = os.getcwd()
-            image_path = os.path.join(project_root_dir, f"run/images/frame_{i}.png")
-            plt.savefig(image_path)
-            # Iterate over each query
+
+            # Iterate over each patch index
             for j in range(top_indices.shape[1]):
-                query_dir = os.path.join(project_root_dir, f"run/images/query_{j}")
-                os.makedirs(query_dir, exist_ok=True)
-                # Iterate over each patch index
-                for k in range(top_indices.shape[2]):
-                    # Get the patch index
-                    patch_index = top_indices[i, j, k].cpu().item()
+                # Get the patch index
+                patch_index = top_indices[i, j].cpu().item()
 
-                    # Calculate the top left corner of the patch in the image
-                    start_x = (patch_index % nr_patches_width) * patch_size
-                    start_y = (patch_index // nr_patches_height) * patch_size
+                # Calculate the top left corner of the patch in the image
+                start_x = (patch_index % nr_patches_width) * patch_size
+                start_y = (patch_index // nr_patches_height) * patch_size
 
-                    # Create a Rectangle patch
-                    rect = patches.Rectangle((start_x, start_y), patch_size, patch_size, linewidth=1, edgecolor='r',
-                                             facecolor='none')
+                # Create a Rectangle patch
+                rect = patches.Rectangle((start_x, start_y), patch_size, patch_size, linewidth=1, edgecolor='r',
+                                         facecolor='none')
 
-                    # Add the patch to the Axes
-                    ax.add_patch(rect)
+                # Add the patch to the Axes
+                ax.add_patch(rect)
 
-                plt.savefig(f"{query_dir}/frame_{i}.png")
-                ax.clear()
-                ax.axis("off")
-                ax.set_visible(False)
-                ax.remove()
-                fig, ax = plt.subplots(1)
-                # Display the image
-                ax.imshow(images[i].permute(1, 2, 0).cpu().numpy().astype('float64'))
+            plt.savefig(f"{frame_dir}/frame_{i}.png")
+            ax.clear()
+            ax.axis("off")
+            ax.set_visible(False)
+            ax.remove()
+            fig, ax = plt.subplots(1)
+            # Display the image
+            ax.imshow(images[i].permute(1, 2, 0).cpu().numpy().astype('float64'))
     def token_generation(self, text_q, vis_embed, long_video=False, images=None):
         ctx_embed = self.get_model().vlm_att_key_projector(vis_embed)
         # Key part 1: calculate context-related embedding
         ctx_embed = text_q @ ctx_embed.transpose(-1, -2)
         ctx_embed = ctx_embed / (vis_embed.shape[-1] ** 0.5)
         if images is not None:
-            top_indices = self.top_patches(ctx_embed, top_k=20)
-            self.plot_top_patches(top_indices, images)
+            top_indices, top_indices_frames = self.top_patches(ctx_embed, top_k=20)
+            self.plot_top_patches(top_indices, top_indices_frames, images)
         if not long_video:
             ctx_embed = ctx_embed.softmax(-1) @ vis_embed
             ctx_embed = ctx_embed.mean(1)
