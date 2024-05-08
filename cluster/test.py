@@ -26,7 +26,9 @@ def kmedoids_vs_fast_kmedoids_speed_test():
 	X = torch.rand(1000, 10)
 	X = X.cuda(0)
 	K = 49
-	distance_matrix = pairwise_distance(X, X, metric='euclidean', all_negative=True)
+
+	#distance_matrix = pairwise_distance(X, X, metric='euclidean', all_negative=True)
+	distance_matrix = pairwise_distance(X, X, metric='cosine', all_negative=True)
 
 	# warm up
 	for i in range(10):

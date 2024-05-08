@@ -15,7 +15,7 @@
 # Modified from LLaVA (https://github.com/haotian-liu/LLaVA)
 # Copyright 2023 Yanwei Li
 # ------------------------------------------------------------------------
-
+import argparse
 from abc import ABC, abstractmethod
 import os
 import json
@@ -38,6 +38,7 @@ from .multimodal_projector.builder import build_vision_projector
 
 from llamavid.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 
+from cluster.cluster import get_cluster_inter
 
 class LLaMAVIDMetaModel:
 
@@ -241,6 +242,37 @@ class LLaMAVIDMetaModel:
         return tokenizer, mm_model, query_tokens
 
 
+
+def create_default_args():
+    args = argparse.Namespace(
+        cluster_inter=True,
+        max_frames=100,
+        target_frames_blocks=[50, 25, 12],
+        cluster_num_blocks=[2048, 1024, 512],
+        cluster_algo='kmediods++',
+        cluster_distance='euclidean',
+        cluster_threshold=1e-6,
+        cluster_iter_limit=80,
+        minkowski_norm_p=2.0,
+        spectral_sigma=2.0,
+        spectral_graph='HeatKernel',
+        spectral_knn_k=0,
+        spectral_spg=False,
+        aggregation=None,
+        pretrained_clip_name='ViT-L/14',
+        cluster_embedding=False,
+        cluster_frame_embedding=False,
+        adaptive_cls=False,
+        save_feature_path=None,
+        svd_correct_sign=1,
+        pre_norm=False
+    )
+    return args
+def clustering(image_features):
+    print('CLUSTERING IS TRUE, SHOULD BE OFF')
+    args = create_default_args()
+    get_cluster_inter(image_features.shape[-1], 1, args)
+
 class LLaMAVIDMetaForCausalLM(ABC):
 
     @abstractmethod
@@ -250,13 +282,16 @@ class LLaMAVIDMetaForCausalLM(ABC):
     def get_vision_tower(self):
         return self.get_model().get_vision_tower()
 
-    def encode_images(self, images, prompts=None, image_counts=None, long_video=False):        
+
+    def encode_images(self, images, prompts=None, image_counts=None, long_video=False):
         if long_video:
             # use pre-computed features
             image_features = images
         else:
             image_features = self.get_model().get_vision_tower()(images)
-
+        cluster = True # Hard Coded, set to false when running normally
+        if cluster:
+            clustering(image_features)
         image_features = self.vlm_attention(image_features, 
                                             prompts=prompts, 
                                             image_counts=image_counts,
