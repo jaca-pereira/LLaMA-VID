@@ -47,3 +47,4 @@ logs
 run
 wandb
 ./~
+cluster/*.png

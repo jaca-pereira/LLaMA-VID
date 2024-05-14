@@ -26,13 +26,11 @@ def kmedoids_vs_fast_kmedoids_speed_test():
 	X = torch.rand(1000, 10)
 	X = X.cuda(0)
 	K = 49
-
-	#distance_matrix = pairwise_distance(X, X, metric='euclidean', all_negative=True)
-	distance_matrix = pairwise_distance(X, X, metric='cosine', all_negative=True)
+	distance_matrix = pairwise_distance(X, X, metric='euclidean', all_negative=True)
 
 	# warm up
 	for i in range(10):
-		N = torch.matmul(X, X.transpose(0, 1))	
+		N = torch.matmul(X, X.transpose(0, 1))
 
 	torch.cuda.synchronize()
 	start = time.time()
@@ -71,7 +69,7 @@ def batch_kmedoids_speed_test():
 	print(X.shape)
 	# warm up
 	for i in range(10):
-		N = torch.matmul(X, X.transpose(-2, -1))	
+		N = torch.matmul(X, X.transpose(-2, -1))
 
 	torch.cuda.synchronize()
 	start = time.time()
@@ -125,12 +123,12 @@ def spectral_vs_fast_kmedoids_speed_test():
 	print(X.shape)
 	# warm up
 	for i in range(10):
-		N = torch.matmul(X, X.transpose(-2, -1))	
+		N = torch.matmul(X, X.transpose(-2, -1))
 
 	torch.cuda.synchronize()
 	start = time.time()
 	for i in range(10):
-		assign, ids = batch_spectral_clustering(X, K, mode='HeatKernel', 
+		assign, ids = batch_spectral_clustering(X, K, mode='HeatKernel',
 													metric='euclidean',
 													threshold=1e-5, iter_limit=60,
 													id_sort=True, norm_p=1.0,

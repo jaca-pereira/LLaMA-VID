@@ -20,12 +20,11 @@ from abc import ABC, abstractmethod
 import os
 import json
 
-import matplotlib.pyplot as plt
-import numpy as np
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from sklearn.manifold import TSNE
 
 from transformers import BertTokenizer
 from transformers.models.bert.modeling_bert import BertLMHeadModel as BertLMHeadModelRaw
@@ -38,7 +37,13 @@ from .multimodal_projector.builder import build_vision_projector
 
 from llamavid.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 
-from cluster.cluster import get_cluster_inter
+from matplotlib import patches, pyplot as plt
+from matplotlib.offsetbox import AnnotationBbox, OffsetImage
+from sklearn.cluster import KMeans, DBSCAN, SpectralClustering
+import umap
+import seaborn as sns
+import numpy as np
+import pandas as pd
 
 class LLaMAVIDMetaModel:
 
@@ -241,37 +246,88 @@ class LLaMAVIDMetaModel:
         
         return tokenizer, mm_model, query_tokens
 
+def divide_into_patches(video, patch_size=14):
+    # Ensure the input tensor is a PyTorch tensor
+    assert isinstance(video, torch.Tensor), "Input video must be a PyTorch tensor"
 
+    # Ensure the input tensor has the correct number of dimensions
+    assert video.dim() == 4, "Input video tensor must be 4-dimensional"
 
-def create_default_args():
-    args = argparse.Namespace(
-        cluster_inter=True,
-        max_frames=100,
-        target_frames_blocks=[50, 25, 12],
-        cluster_num_blocks=[2048, 1024, 512],
-        cluster_algo='kmediods++',
-        cluster_distance='euclidean',
-        cluster_threshold=1e-6,
-        cluster_iter_limit=80,
-        minkowski_norm_p=2.0,
-        spectral_sigma=2.0,
-        spectral_graph='HeatKernel',
-        spectral_knn_k=0,
-        spectral_spg=False,
-        aggregation=None,
-        pretrained_clip_name='ViT-L/14',
-        cluster_embedding=False,
-        cluster_frame_embedding=False,
-        adaptive_cls=False,
-        save_feature_path=None,
-        svd_correct_sign=1,
-        pre_norm=False
-    )
-    return args
-def clustering(image_features):
-    print('CLUSTERING IS TRUE, SHOULD BE OFF')
-    args = create_default_args()
-    get_cluster_inter(image_features.shape[-1], 1, args)
+    # Get the number of frames, channels, width, and height
+    nr_frames, nr_channels, width, height = video.shape
+
+    # Calculate the number of patches in width and height
+    nr_patches_width = width // patch_size
+    nr_patches_height = height // patch_size
+
+    # Check if the video can be evenly divided into patches
+    assert width % patch_size == 0, "Width must be evenly divisible by the patch size"
+    assert height % patch_size == 0, "Height must be evenly divisible by the patch size"
+
+    # Divide the video into patches
+    patches = video.unfold(2, patch_size, patch_size).unfold(3, patch_size, patch_size)
+    patches = patches.reshape(nr_frames, nr_channels,   nr_patches_width * nr_patches_height, patch_size, patch_size)
+    patches = patches.permute(0, 2, 3, 4, 1)
+    patches = patches.reshape(nr_frames*nr_patches_width*nr_patches_height, patch_size, patch_size, nr_channels)
+    return patches
+
+def tsne_viz2(image_features, video, plot_images=False, top_indices=None):
+    image_features = image_features[:, 1:, :]  # remove cls token
+    image_features = image_features.reshape(image_features.shape[0] * image_features.shape[1], image_features.shape[2])
+    df = pd.DataFrame()
+    df['frame_nr'] = np.repeat(np.arange(len(video)), len(image_features) // len(video))
+    df['token_nr'] = np.tile(np.arange(len(image_features) // len(video)), len(video))
+    if top_indices is not None:
+        nr_frames, nr_tokens = top_indices.shape
+        frame_indices = torch.arange(nr_frames).view(-1, 1).expand(-1, nr_tokens).to(top_indices.device)
+        top_indices_all_tokens = top_indices + top_indices*frame_indices
+        image_features_top = image_features[top_indices_all_tokens.flatten()]
+        series_top_indices_token_nr = df['token_nr'][top_indices_all_tokens.flatten().cpu().numpy()]
+        series_top_indices_frame_nr = df['frame_nr'][top_indices_all_tokens.flatten().cpu().numpy()]
+        df = pd.DataFrame()
+        df['frame_nr'] = series_top_indices_frame_nr
+        df['token_nr'] = series_top_indices_token_nr
+    else:
+        image_features_top = image_features
+    #norm = image_features.pow(2).sum(dim=1).sqrt()
+    #image_features_norm = image_features / norm.unsqueeze(-1)
+    #reducer = TSNE(n_components=2, metric="cosine", random_state=8)
+    reducer = umap.UMAP(random_state=8)
+    tsne_results = reducer.fit_transform(image_features_top.cpu())
+    clustering = KMeans(n_clusters=50, random_state=8)
+    cluster_labels = clustering.fit_predict(tsne_results)
+    #clustering = SpectralClustering(n_clusters=50, random_state=8, assign_labels='cluster_qr')
+    #cluster_labels = clustering.fit_predict(image_features.cpu())
+    clusters = np.unique(cluster_labels)
+
+    df['x'] = tsne_results[:, 0]
+    df['y'] = tsne_results[:, 1]
+
+    # Create a scatter plot for the t-SNE results
+    plt.figure(figsize=(20, 20))
+    sns.scatterplot(data=df, x='x', y='y', hue='frame_nr', palette='Paired')
+
+    # Add image patches to the plot
+    if plot_images:
+        ax = plt.gca()
+        image_patches = divide_into_patches(video, patch_size=28)
+        if top_indices is not None:
+            image_patches = image_patches[top_indices.flatten().cpu().numpy()]
+        nr_plots_per_cluster = np.zeros(len(clusters))
+        max_tokens_plot_per_cluster = 3
+        for i in range(len(image_patches)):
+            if nr_plots_per_cluster[cluster_labels[i]] < max_tokens_plot_per_cluster:
+                img = image_patches[i//2]
+                img = img.cpu().type(torch.float32).numpy()
+                imagebox = OffsetImage(img, zoom=1.0)
+                imagebox.image.axes = ax
+                ab = AnnotationBbox(imagebox, (tsne_results[i, 0], tsne_results[i, 1]))
+                ax.add_artist(ab)
+                nr_plots_per_cluster[cluster_labels[i]] += 1
+
+    plt.show()
+    plt.close()
+    exit(1)
 
 class LLaMAVIDMetaForCausalLM(ABC):
 
@@ -289,13 +345,13 @@ class LLaMAVIDMetaForCausalLM(ABC):
             image_features = images
         else:
             image_features = self.get_model().get_vision_tower()(images)
-        cluster = True # Hard Coded, set to false when running normally
+        cluster = False # Hard Coded, set to false when running normally
         if cluster:
-            clustering(image_features)
+            tsne_viz2(image_features, images, plot_images=True)
         image_features = self.vlm_attention(image_features, 
                                             prompts=prompts, 
                                             image_counts=image_counts,
-                                            long_video=long_video, images=None) #IMPORTANT: images should be None unless you want to plot top patches
+                                            long_video=long_video, images=images) #IMPORTANT: images should be None unless you want to plot top patches
         return image_features
 
     def vlm_attention(self, image_features, prompts=None, image_counts=None, long_video=False, images=None):
@@ -490,7 +546,10 @@ class LLaMAVIDMetaForCausalLM(ABC):
         ctx_embed = text_q @ ctx_embed.transpose(-1, -2)
         ctx_embed = ctx_embed / (vis_embed.shape[-1] ** 0.5)
         if images is not None:
-            top_indices, top_indices_frames = self.top_patches(ctx_embed, top_k=20)
+            top_indices, top_indices_frames = self.top_patches(ctx_embed, top_k=40)
+            cluster = False
+            if cluster:
+                tsne_viz2(vis_embed, images, plot_images=False, top_indices=top_indices)
             self.plot_top_patches(top_indices, top_indices_frames, images)
         if not long_video:
             ctx_embed = ctx_embed.softmax(-1) @ vis_embed

@@ -42,7 +42,7 @@ def get_cluster_inter(width, block_id, args=None):
 								cluster_num=cluster_num,
 								before_block_frames=before_block_frames,
 								after_block_frames=after_block_frames,
-								original_frame=args.max_frames,								
+								original_frame=args.max_frames,
 								distance=args.cluster_distance,
 								threshold=args.cluster_threshold,
 								iter_limit=args.cluster_iter_limit,
@@ -61,7 +61,6 @@ def get_cluster_inter(width, block_id, args=None):
 								svd_correct_sign=args.svd_correct_sign,
 								pre_norm=args.pre_norm
 							)
-
 
 class TokenClusterInter(torch.nn.Module):
 	def __init__(self, algorithm='kmediods++',
@@ -202,6 +201,7 @@ class TokenClusterInter(torch.nn.Module):
 							spectral_graph, spectral_sigma, self.spectral_knn_k,
 							spectral_spatial_temporal_graph, svd_correct_sign, mean_residual))
 			logging.info('[cluster] Creating cluster algorithm object in transformer blocks...[DONE]\n')
+
 
 	def forward(self, x):
 		"""
