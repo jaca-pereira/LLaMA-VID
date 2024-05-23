@@ -260,10 +260,10 @@ class LLaMAVIDMetaForCausalLM(ABC):
         image_features = self.vlm_attention(image_features, 
                                             prompts=prompts, 
                                             image_counts=image_counts,
-                                            long_video=long_video, images=None) #IMPORTANT: images should be None unless you want to plot top patches
+                                            long_video=long_video)
         return image_features
 
-    def vlm_attention(self, image_features, prompts=None, image_counts=None, long_video=False, images=None):
+    def vlm_attention(self, image_features, prompts=None, image_counts=None, long_video=False):
         img_feat_lst = []
         if image_counts is None:
             assert len(image_features) == len(prompts), f"Size mismatch! image_features: {len(image_features)}, prompts: {len(prompts)}"
@@ -364,7 +364,7 @@ class LLaMAVIDMetaForCausalLM(ABC):
                 raise ValueError(f'Unexpected bert type: {self.config.bert_type}')
             
             text_q = self.get_model().vlm_att_projector(mm_output) #linear projector from context attnetion. Not projection for LLM
-            final_token = self.token_generation(text_q, img_feat_prompt, long_video=long_video, images= images)
+            final_token = self.token_generation(text_q, img_feat_prompt, long_video=long_video)
 
             if image_counts is not None:
                 # shape: [prompt_num, frame_num*image_shape, feat_dim]
@@ -449,14 +449,11 @@ class LLaMAVIDMetaForCausalLM(ABC):
             fig, ax = plt.subplots(1)
             # Display the image
             ax.imshow(images[i].permute(1, 2, 0).cpu().numpy().astype('float64'))
-    def token_generation(self, text_q, vis_embed, long_video=False, images=None):
+    def token_generation(self, text_q, vis_embed, long_video=False):
         ctx_embed = self.get_model().vlm_att_key_projector(vis_embed)
         # Key part 1: calculate context-related embedding
         ctx_embed = text_q @ ctx_embed.transpose(-1, -2)
         ctx_embed = ctx_embed / (vis_embed.shape[-1] ** 0.5)
-        if images is not None:
-            top_indices, top_indices_frames = self.top_patches(ctx_embed, top_k=20)
-            self.plot_top_patches(top_indices, top_indices_frames, images)
         if not long_video:
             ctx_embed = ctx_embed.softmax(-1) @ vis_embed
             ctx_embed = ctx_embed.mean(1)
