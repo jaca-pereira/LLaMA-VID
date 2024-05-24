@@ -37,6 +37,7 @@ from .multimodal_encoder.builder import build_vision_tower
 from .multimodal_projector.builder import build_vision_projector
 
 from llamavid.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+from .to_me.token_merging import kth_bipartite_soft_matching, merge_wavg
 
 
 class LLaMAVIDMetaModel:
@@ -91,6 +92,13 @@ class LLaMAVIDMetaModel:
 
             self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'mm_projector'))
 
+    def initialize_token_merging(self):
+        self.config.mm_token_merging = getattr(self.config, 'mm_token_merging', False)
+        self.config.mm_token_merging_kth = getattr(self.config, 'mm_token_merging_kth', 2)
+        self.token_merge = kth_bipartite_soft_matching if self.config.mm_token_merging else None
+        self.token_merge_wavg = merge_wavg if self.config.mm_token_merging else None
+
+    """
     def initialize_attention_modules(self, model_args, for_eval=False):  
         pretrain_mm_mlp_adapter = getattr(model_args, "pretrain_mm_mlp_adapter", None)
         pretrain_qformer = getattr(model_args, "pretrain_qformer", None)
@@ -201,7 +209,7 @@ class LLaMAVIDMetaModel:
             if self.vlm_att_bert_proj is not None:
                 self.vlm_att_bert_proj = self.vlm_att_bert_proj.to(device=device_type, dtype=weight_type)
             
-
+    
     def init_bert(self, vision_width, cross_attention_freq=2, truncation_side="right"):
         # initialize BERT tokenizer
         tokenizer = BertTokenizer.from_pretrained("bert-base-uncased", truncation_side=truncation_side)
@@ -239,7 +247,7 @@ class LLaMAVIDMetaModel:
             print(f"Only use {layer_num} layers in BERT...")
         
         return tokenizer, mm_model, query_tokens
-
+    """
 
 class LLaMAVIDMetaForCausalLM(ABC):
 
@@ -250,19 +258,35 @@ class LLaMAVIDMetaForCausalLM(ABC):
     def get_vision_tower(self):
         return self.get_model().get_vision_tower()
 
-    def encode_images(self, images, prompts=None, image_counts=None, long_video=False):        
+    def get_token_merging(self):
+        return self.get_model().token_merge
+    def get_token_merging_wavg(self):
+        return self.get_model().token_merge_wavg
+
+    #changed function definition
+    #def encode_images(self, images, prompts=None, image_counts=None, long_video=False):
+    def encode_images(self, images, long_video=False):
         if long_video:
             # use pre-computed features
             image_features = images
         else:
             image_features = self.get_model().get_vision_tower()(images)
 
+        #token merging
+        if self.config.mm_token_merging:
+            merge, _ = self.get_token_merging()(image_features, self.config.mm_token_merging_kth)
+            image_features, _ = self.get_token_merging_wavg()(merge, image_features, None)
+
+        #removed vlm_attention
+        """ 
         image_features = self.vlm_attention(image_features, 
                                             prompts=prompts, 
                                             image_counts=image_counts,
                                             long_video=long_video)
+        """
         return image_features
 
+    """
     def vlm_attention(self, image_features, prompts=None, image_counts=None, long_video=False):
         img_feat_lst = []
         if image_counts is None:
@@ -373,82 +397,8 @@ class LLaMAVIDMetaForCausalLM(ABC):
             img_feat_lst.append(final_token)
 
         return img_feat_lst
+    
 
-    def top_patches(self, ctx_embed, top_k=20):
-        # Ensure the input tensor is a PyTorch tensor
-        assert isinstance(ctx_embed, torch.Tensor), "Input must be a PyTorch tensor"
-
-        # Ensure the input tensor has the correct number of dimensions
-        assert ctx_embed.dim() == 3, "Input tensor must be 3-dimensional"
-
-        #calculate the mean token importance for all queries
-        ctx_embed = ctx_embed.mean(dim=-2)
-
-        # Calculate the top 20 patches
-        _, top_indices = torch.topk(ctx_embed, top_k, dim=-1)
-
-        #Calculate the mean token importance for each frame
-        ctx_embed = ctx_embed.mean(-1)
-
-        # Calculate the top 5 frames
-        _, top_indices_frames = torch.topk(ctx_embed, top_k, dim=-1)
-
-        return top_indices, top_indices_frames
-
-    def plot_top_patches(self, top_indices, top_indices_frames, images, patch_size=14):
-        import matplotlib.pyplot as plt
-        import matplotlib.patches as patches
-        # Ensure the input tensors are PyTorch tensors
-        assert isinstance(top_indices, torch.Tensor), "Input top_indices must be a PyTorch tensor"
-        assert isinstance(images, torch.Tensor), "Input images must be a PyTorch tensor"
-
-        # Ensure the input tensors have the correct number of dimensions
-        assert top_indices.dim() == 2, "Input top_indices tensor must be 2-dimensional"
-        assert images.dim() == 4, "Input images tensor must be 4-dimensional"
-
-        # Get the number of frames, channels, width, and height
-        nr_frames, nr_channels, width, height = images.shape
-
-        # Calculate the number of patches in width and height
-        nr_patches_width = width // patch_size
-        nr_patches_height = height // patch_size
-
-        project_root_dir = os.getcwd()
-        frame_dir = os.path.join(project_root_dir, f"run/images/")
-        os.makedirs(frame_dir, exist_ok=True)
-
-        # Iterate over each frame
-        for i in top_indices_frames:
-            # Create a new figure for each frame
-            fig, ax = plt.subplots(1)
-
-            # Display the image
-            ax.imshow(images[i].permute(1, 2, 0).cpu().numpy().astype('float64'))
-
-            # Iterate over each patch index
-            for j in range(top_indices.shape[1]):
-                # Get the patch index
-                patch_index = top_indices[i, j].cpu().item()
-
-                # Calculate the top left corner of the patch in the image
-                start_x = (patch_index % nr_patches_width) * patch_size
-                start_y = (patch_index // nr_patches_height) * patch_size
-
-                # Create a Rectangle patch
-                rect = patches.Rectangle((start_x, start_y), patch_size, patch_size, linewidth=1, edgecolor='r',
-                                         facecolor='none')
-
-                # Add the patch to the Axes
-                ax.add_patch(rect)
-
-            plt.savefig(f"{frame_dir}/frame_{i}.png")
-            ax.clear()
-            ax.axis("off")
-            ax.set_visible(False)
-            ax.remove()
-            fig, ax = plt.subplots(1)
-            # Display the image
-            ax.imshow(images[i].permute(1, 2, 0).cpu().numpy().astype('float64'))
     def token_generation(self, text_q, vis_embed, long_video=False):
         ctx_embed = self.get_model().vlm_att_key_projector(vis_embed)
         # Key part 1: calculate context-related embedding
@@ -490,6 +440,7 @@ class LLaMAVIDMetaForCausalLM(ABC):
         vis_embed = self.get_model().mm_projector(vis_embed)                
         final_token = torch.cat([ctx_embed, vis_embed], dim=1)
         return final_token
+    """
 
     def update_prompt(self, prompts=None):
         self.prompts = prompts

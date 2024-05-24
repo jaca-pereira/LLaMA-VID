@@ -1204,8 +1204,10 @@ def train():
         model.config.mm_use_im_patch_token = model_args.mm_use_im_patch_token
         model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
 
+        # initialize token merging HERE
+        model.initialize_token_merging(model_args)
     # all the attention modules require grad
-    model.get_model().initialize_attention_modules(model_args)
+    """model.get_model().initialize_attention_modules(model_args)"""
 
     if training_args.bits in [4, 8]:
         from peft.tuners.lora import LoraLayer
