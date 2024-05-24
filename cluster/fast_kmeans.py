@@ -153,7 +153,7 @@ def batch_fast_kmedoids_st(X, X_s, X_t, K, distance='euclidean', threshold=1e-5,
     assert distance in ['euclidean', 'cosine'] and X.ndim == 3
 
     B, N, L = X.shape[0], X.shape[1], X.shape[2]
-    distance_matrix = pairwise_distance_st(X, X, X_s, X_s, X_t, X_t, metric=distance, all_negative=True)
+    distance_matrix = pairwise_distance_st(X, X, X_s, X_s, X_t, X_t, metric=distance, all_negative=False)
     repeat_dis_m = distance_matrix.unsqueeze(1).repeat(1, K, 1, 1)							# [B, K, N, N]
     # step 1: initialize medoids (KKZ)
     mediods = KKZ_init(X, distance_matrix, K, batch=True)   								# [B, K]

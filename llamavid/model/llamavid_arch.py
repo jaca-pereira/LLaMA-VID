@@ -20,22 +20,25 @@ from abc import ABC, abstractmethod
 import os
 import json
 
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from scipy.cluster.hierarchy import linkage, dendrogram, fcluster
 from sklearn.manifold import TSNE
 
 from transformers import BertTokenizer
 from transformers.models.bert.modeling_bert import BertLMHeadModel as BertLMHeadModelRaw
 
+from cluster.cluster_utils import pairwise_distance_st
+from cluster.fast_kmeans import batch_fast_kmedoids_with_split_st, fast_kmedoids
 from .qformer import BertConfig
 from .qformer import BertLMHeadModel as BertLMHeadModelQF
 
 from .multimodal_encoder.builder import build_vision_tower
 from .multimodal_projector.builder import build_vision_projector
 
-from llamavid.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+from llamavid.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, \
+    DEFAULT_IM_END_TOKEN
 
 from matplotlib import patches, pyplot as plt
 from matplotlib.offsetbox import AnnotationBbox, OffsetImage
@@ -44,6 +47,7 @@ import umap
 import seaborn as sns
 import numpy as np
 import pandas as pd
+
 
 class LLaMAVIDMetaModel:
 
@@ -82,7 +86,7 @@ class LLaMAVIDMetaModel:
         self.config.mm_vision_select_layer = mm_vision_select_layer
         self.config.mm_vision_select_feature = mm_vision_select_feature
         self.config.max_token = max_token
-        
+
         if getattr(self, 'mm_projector', None) is None:
             self.mm_projector = build_vision_projector(self.config)
         else:
@@ -92,12 +96,13 @@ class LLaMAVIDMetaModel:
 
         if pretrain_mm_mlp_adapter is not None:
             mm_projector_weights = torch.load(pretrain_mm_mlp_adapter, map_location='cpu')
+
             def get_w(weights, keyword):
                 return {k.split(keyword + '.')[1]: v for k, v in weights.items() if keyword in k}
 
             self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'mm_projector'))
 
-    def initialize_attention_modules(self, model_args, for_eval=False):  
+    def initialize_attention_modules(self, model_args, for_eval=False):
         pretrain_mm_mlp_adapter = getattr(model_args, "pretrain_mm_mlp_adapter", None)
         pretrain_qformer = getattr(model_args, "pretrain_qformer", None)
         self.config.bert_type = getattr(model_args, "bert_type", "qformer")
@@ -109,24 +114,25 @@ class LLaMAVIDMetaModel:
             att_feat_size = 1408
         else:
             att_feat_size = self.config.mm_hidden_size
-        self.vlm_att_tokenlizer, self.vlm_att_encoder, self.vlm_att_query = self.init_bert(att_feat_size, truncation_side="left")
+        self.vlm_att_tokenlizer, self.vlm_att_encoder, self.vlm_att_query = self.init_bert(att_feat_size,
+                                                                                           truncation_side="left")
         self.vlm_att_projector = torch.nn.Linear(self.vlm_att_encoder.config.hidden_size, self.config.mm_hidden_size)
-        self.vlm_att_key_projector  = torch.nn.Linear(self.config.mm_hidden_size, self.config.mm_hidden_size)
-        self.vlm_att_val_projector  = torch.nn.Linear(self.config.mm_hidden_size, self.config.hidden_size)
+        self.vlm_att_key_projector = torch.nn.Linear(self.config.mm_hidden_size, self.config.mm_hidden_size)
+        self.vlm_att_val_projector = torch.nn.Linear(self.config.mm_hidden_size, self.config.hidden_size)
 
         if "raw" in self.config.bert_type:
-            self.vlm_att_bert_proj  = torch.nn.Linear(att_feat_size, self.vlm_att_encoder.config.hidden_size)
-        elif "pretrain" in self.config.bert_type and self.config.mm_hidden_size!=att_feat_size:
+            self.vlm_att_bert_proj = torch.nn.Linear(att_feat_size, self.vlm_att_encoder.config.hidden_size)
+        elif "pretrain" in self.config.bert_type and self.config.mm_hidden_size != att_feat_size:
             self.vlm_att_bert_proj = torch.nn.Linear(self.config.mm_hidden_size, att_feat_size)
         else:
             self.vlm_att_bert_proj = None
-        
+
         def get_w(weights, keyword):
             return {k.split(keyword + '.')[1]: v for k, v in weights.items() if keyword in k}
-        
+
         if 'qformer_pretrain' in self.config.bert_type:
             self.vlm_att_ln = torch.nn.LayerNorm(att_feat_size)
-        
+
         if pretrain_qformer is not None:
             print("Loading pretrained qformer weights...")
             qformer_weight = torch.load(pretrain_qformer, map_location='cpu')['model']
@@ -134,7 +140,7 @@ class LLaMAVIDMetaModel:
             self.vlm_att_encoder.load_state_dict(get_w(bert_weight, 'Qformer'))
             self.vlm_att_ln.load_state_dict(get_w(qformer_weight, 'ln_vision'))
             self.vlm_att_query.data = qformer_weight['query_tokens']
-        
+
         if 'freeze_all' in self.config.bert_type:
             print("Freezing all qformer weights...")
             self.vlm_att_encoder.requires_grad_(False)
@@ -148,12 +154,11 @@ class LLaMAVIDMetaModel:
             self.vlm_att_encoder.requires_grad_(False)
             self.vlm_att_ln.requires_grad_(False)
             self.vlm_att_query.requires_grad_(False)
-        
 
         if pretrain_mm_mlp_adapter is not None:
             att_projector_weights = torch.load(pretrain_mm_mlp_adapter, map_location='cpu')
         else:
-            trainable_module = ['vlm_att_encoder', 'vlm_att_projector', 'vlm_att_key_projector', 
+            trainable_module = ['vlm_att_encoder', 'vlm_att_projector', 'vlm_att_key_projector',
                                 'vlm_att_val_projector', 'vlm_att_query', 'vlm_att_visual_proj',
                                 'vlm_att_ln']
             if hasattr(model_args, 'model_name_or_path'):
@@ -162,15 +167,18 @@ class LLaMAVIDMetaModel:
                 model_save_path = model_args.model_path
             model_idx_path = getattr(model_args, 'model_path', model_save_path)
             project_root_dir = os.getcwd()
-            model_idx_path = os.path.join(project_root_dir, "work_dirs/llama-vid/llama-vid-13b-full-224-video-fps-1/snapshots/3ce9a9e67e439a56ca3ac1aabdd4724afd833f82")
-            weight_file = json.load(open(os.path.join(model_idx_path, 'pytorch_model.bin.index.json'), 'r'))['weight_map']
-            model_path = set([weight_file[_key] for _key in weight_file if any([_module in _key for _module in trainable_module])])
+            model_idx_path = os.path.join(project_root_dir,
+                                          "work_dirs/llama-vid/llama-vid-13b-full-224-video-fps-1/snapshots/3ce9a9e67e439a56ca3ac1aabdd4724afd833f82")
+            weight_file = json.load(open(os.path.join(model_idx_path, 'pytorch_model.bin.index.json'), 'r'))[
+                'weight_map']
+            model_path = set(
+                [weight_file[_key] for _key in weight_file if any([_module in _key for _module in trainable_module])])
             att_projector_weights = {}
             for _model in model_path:
                 att_projector_weights.update(torch.load(os.path.join(model_idx_path, _model), map_location='cpu'))
             if len(att_projector_weights) == 0:
                 return
-        
+
         bert_dict = get_w(att_projector_weights, 'vlm_att_encoder')
         if "bert.embeddings.position_ids" not in bert_dict and "raw_bert" not in self.config.bert_type:
             bert_dict["bert.embeddings.position_ids"] = self.vlm_att_encoder.bert.embeddings.position_ids
@@ -190,7 +198,7 @@ class LLaMAVIDMetaModel:
         if self.vlm_att_bert_proj is not None:
             print('Loading vlm_att_bert_proj weights...')
             self.vlm_att_bert_proj.load_state_dict(get_w(att_projector_weights, 'vlm_att_bert_proj'))
-        
+
         if for_eval:
             weight_type = torch.float16
             device_type = self.mm_projector[0].weight.device
@@ -203,10 +211,9 @@ class LLaMAVIDMetaModel:
                 self.vlm_att_query.data = self.vlm_att_query.data.to(device=device_type, dtype=weight_type)
                 if "pretrain" in self.config.bert_type:
                     self.vlm_att_ln = self.vlm_att_ln.to(device=device_type, dtype=weight_type)
-            
+
             if self.vlm_att_bert_proj is not None:
                 self.vlm_att_bert_proj = self.vlm_att_bert_proj.to(device=device_type, dtype=weight_type)
-            
 
     def init_bert(self, vision_width, cross_attention_freq=2, truncation_side="right"):
         # initialize BERT tokenizer
@@ -219,7 +226,7 @@ class LLaMAVIDMetaModel:
         encoder_config.add_cross_attention = True
         encoder_config.cross_attention_freq = cross_attention_freq
         query_tokens = None
-        
+
         if "qformer" in self.config.bert_type:
             mm_model = BertLMHeadModelQF.from_pretrained(
                 "bert-base-uncased", config=encoder_config
@@ -235,99 +242,164 @@ class LLaMAVIDMetaModel:
             )
         else:
             raise NotImplementedError("BERT type not implemented...")
-        
+
         mm_model.resize_token_embeddings(len(tokenizer))
         mm_model.cls = None
-        
+
         if "layer" in self.config.bert_type:
             layer_num = int(self.config.bert_type.split(':')[-1])
             mm_model.bert.encoder.layer = mm_model.bert.encoder.layer[:layer_num]
             print(f"Only use {layer_num} layers in BERT...")
-        
+
         return tokenizer, mm_model, query_tokens
 
-def divide_into_patches(video, patch_size=14):
-    # Ensure the input tensor is a PyTorch tensor
-    assert isinstance(video, torch.Tensor), "Input video must be a PyTorch tensor"
 
-    # Ensure the input tensor has the correct number of dimensions
+def divide_into_patches(video, patch_size=14):
+    assert isinstance(video, torch.Tensor), "Input video must be a PyTorch tensor"
     assert video.dim() == 4, "Input video tensor must be 4-dimensional"
 
-    # Get the number of frames, channels, width, and height
     nr_frames, nr_channels, width, height = video.shape
-
-    # Calculate the number of patches in width and height
     nr_patches_width = width // patch_size
     nr_patches_height = height // patch_size
 
-    # Check if the video can be evenly divided into patches
     assert width % patch_size == 0, "Width must be evenly divisible by the patch size"
     assert height % patch_size == 0, "Height must be evenly divisible by the patch size"
 
-    # Divide the video into patches
     patches = video.unfold(2, patch_size, patch_size).unfold(3, patch_size, patch_size)
-    patches = patches.reshape(nr_frames, nr_channels,   nr_patches_width * nr_patches_height, patch_size, patch_size)
+    patches = patches.reshape(nr_frames, nr_channels, nr_patches_width * nr_patches_height, patch_size, patch_size)
     patches = patches.permute(0, 2, 3, 4, 1)
-    patches = patches.reshape(nr_frames*nr_patches_width*nr_patches_height, patch_size, patch_size, nr_channels)
+    patches = patches.reshape(nr_frames * nr_patches_width * nr_patches_height, patch_size, patch_size, nr_channels)
     return patches
+
+
+def clustering(tsne_results, image_features=None, nr_frames=None, nr_tokens=None, alg='kmedoids', K=50, distance='cosine'):
+    if alg == 'kmedoids':
+        # Temporal position is simply the frame number
+        image_features_t = torch.arange(nr_frames).view(-1, 1).expand(-1, nr_tokens).reshape(-1).to(
+            image_features.device)
+
+        # Spatial position is the token number
+        image_features_s = torch.arange(nr_tokens).view(1, -1).expand(nr_frames, -1).reshape(-1).to(
+            image_features.device)
+
+        image_features_s = image_features_s.unsqueeze(0).unsqueeze(-1)
+        image_features_t = image_features_t.unsqueeze(0).unsqueeze(-1)
+
+        image_features_s = image_features_s.half()
+        image_features_t = image_features_t.half()
+
+        _, medoids = batch_fast_kmedoids_with_split_st(tsne_results, image_features_s,
+                                                       image_features_t, K=K, distance=distance,
+                                                       threshold=1e-5, iter_limit=60, id_sort=True, norm_p=2.0, split_size=4)
+        cluster_labels = medoids.squeeze(0).cpu().numpy()
+    elif alg == 'kmeans':
+        clustering_algo = KMeans(n_clusters=K, random_state=8)
+        cluster_labels = clustering_algo.fit_predict(tsne_results)
+        cluster_labels = np.unique(cluster_labels)
+    elif alg == 'spectral_clustering':
+        clustering_algo = SpectralClustering(n_clusters=K, random_state=8, affinity='nearest_neighbors')
+        cluster_labels = clustering_algo.fit_predict(tsne_results.cpu().numpy())
+        cluster_labels = np.unique(cluster_labels)
+    elif alg == 'hierarchical_clustering':
+        linkage_data = linkage(tsne_results, method='ward', metric=distance)
+        # dendrogram(linkage_data)
+        cluster_labels = fcluster(linkage_data, K, criterion='maxclust')
+    else:
+        pass
+    return cluster_labels
+
+
+def reduce_dim(image_features, alg='umap'):
+    if alg == 'umap':
+        reducer = umap.UMAP(random_state=8)
+    elif alg == 'tsne':
+        reducer = TSNE(n_components=2, random_state=8)
+    reduced = reducer.fit_transform(image_features.cpu())
+    return reduced
+
+
+def get_top_indices(image_features, top_indices, df):
+    nr_frames, nr_tokens = top_indices.shape
+    frame_indices = torch.arange(nr_frames).view(-1, 1).expand(-1, nr_tokens).to(top_indices.device)
+    top_indices_all_tokens = top_indices + top_indices * frame_indices
+    image_features_top = image_features[top_indices_all_tokens.flatten()]
+    series_top_indices_token_nr = df['token_nr'][top_indices_all_tokens.flatten().cpu().numpy()]
+    series_top_indices_frame_nr = df['frame_nr'][top_indices_all_tokens.flatten().cpu().numpy()]
+    df = pd.DataFrame()
+    df['frame_nr'] = series_top_indices_frame_nr
+    df['token_nr'] = series_top_indices_token_nr
+    return df, image_features_top, nr_frames, nr_tokens
+
 
 def tsne_viz2(image_features, video, plot_images=False, top_indices=None):
     image_features = image_features[:, 1:, :]  # remove cls token
+    nr_frames, nr_tokens, _ = image_features.shape
     image_features = image_features.reshape(image_features.shape[0] * image_features.shape[1], image_features.shape[2])
     df = pd.DataFrame()
     df['frame_nr'] = np.repeat(np.arange(len(video)), len(image_features) // len(video))
     df['token_nr'] = np.tile(np.arange(len(image_features) // len(video)), len(video))
     if top_indices is not None:
-        nr_frames, nr_tokens = top_indices.shape
-        frame_indices = torch.arange(nr_frames).view(-1, 1).expand(-1, nr_tokens).to(top_indices.device)
-        top_indices_all_tokens = top_indices + top_indices*frame_indices
-        image_features_top = image_features[top_indices_all_tokens.flatten()]
-        series_top_indices_token_nr = df['token_nr'][top_indices_all_tokens.flatten().cpu().numpy()]
-        series_top_indices_frame_nr = df['frame_nr'][top_indices_all_tokens.flatten().cpu().numpy()]
-        df = pd.DataFrame()
-        df['frame_nr'] = series_top_indices_frame_nr
-        df['token_nr'] = series_top_indices_token_nr
+        df, image_features_top, nr_frames, nr_tokens = get_top_indices(image_features, top_indices, df)
     else:
         image_features_top = image_features
-    #norm = image_features.pow(2).sum(dim=1).sqrt()
-    #image_features_norm = image_features / norm.unsqueeze(-1)
-    #reducer = TSNE(n_components=2, metric="cosine", random_state=8)
-    reducer = umap.UMAP(random_state=8)
-    tsne_results = reducer.fit_transform(image_features_top.cpu())
-    clustering = KMeans(n_clusters=50, random_state=8)
-    cluster_labels = clustering.fit_predict(tsne_results)
-    #clustering = SpectralClustering(n_clusters=50, random_state=8, assign_labels='cluster_qr')
-    #cluster_labels = clustering.fit_predict(image_features.cpu())
-    clusters = np.unique(cluster_labels)
 
+    tsne_results = reduce_dim(image_features_top, alg='umap')
     df['x'] = tsne_results[:, 0]
     df['y'] = tsne_results[:, 1]
 
+    # get clusters using fast kmedoids with split
+    #medoids = clustering(tsne_results, image_features_top, nr_frames, nr_tokens, alg='spectral_clustering', K=3500, distance='euclidean')
+    #medoids = clustering(torch.tensor(tsne_results).to(image_features.device).unsqueeze(0), image_features_top, nr_frames, nr_tokens, alg='kmedoids', K=50, distance='cosine')
+    #medoids = clustering(image_features_top.unsqueeze(0), image_features_top, nr_frames, nr_tokens, alg='kmedoids', K=3500, distance='cosine')
+    medoids = clustering(tsne_results, image_features_top, nr_frames, nr_tokens, alg='hierarchical_clustering', distance='euclidean', K=50)
     # Create a scatter plot for the t-SNE results
-    plt.figure(figsize=(20, 20))
-    sns.scatterplot(data=df, x='x', y='y', hue='frame_nr', palette='Paired')
+    plt.figure(figsize=(10, 10))
+
+    if not plot_images:
+        custom_palette = sns.color_palette("viridis", nr_frames)
+        sns.scatterplot(data=df, x='x', y='y', hue='frame_nr', palette=custom_palette, alpha=0.8, s=15)
+        #plt.scatter(tsne_results[medoids, 0], tsne_results[medoids, 1], c='red', marker='X')
 
     # Add image patches to the plot
-    if plot_images:
+    """if plot_images:
+        #TODO plot images normal with cluster medoids
         ax = plt.gca()
         image_patches = divide_into_patches(video, patch_size=28)
         if top_indices is not None:
             image_patches = image_patches[top_indices.flatten().cpu().numpy()]
-        nr_plots_per_cluster = np.zeros(len(clusters))
+        nr_plots_per_cluster = np.zeros(len(medoids))
         max_tokens_plot_per_cluster = 3
         for i in range(len(image_patches)):
-            if nr_plots_per_cluster[cluster_labels[i]] < max_tokens_plot_per_cluster:
-                img = image_patches[i//2]
+            if nr_plots_per_cluster[medoids[i]] < max_tokens_plot_per_cluster:
+                img = image_patches[i // 2]
                 img = img.cpu().type(torch.float32).numpy()
                 imagebox = OffsetImage(img, zoom=1.0)
                 imagebox.image.axes = ax
                 ab = AnnotationBbox(imagebox, (tsne_results[i, 0], tsne_results[i, 1]))
                 ax.add_artist(ab)
-                nr_plots_per_cluster[cluster_labels[i]] += 1
+                nr_plots_per_cluster[medoids[i]] += 1"""
+    if plot_images:
+        for i, frame in enumerate(video):
+            plt.imshow(frame.permute(1, 2, 0).cpu().numpy().astype('float64'))
+            range_medoids = range(i * nr_tokens, (i + 1) * nr_tokens)
+            for frame_medoid in medoids:
+                if frame_medoid in range_medoids:
+                    frame_token = frame_medoid - i*nr_tokens
+                    patch_row = frame_token // 16
+                    patch_col = frame_token % 16
+                    y = patch_row * 14
+                    x = patch_col * 14
+                    plt.gca().add_patch(patches.Rectangle((x, y), 14, 14, linewidth=1, edgecolor='r', facecolor='none'))
+                elif frame_medoid > range_medoids[-1]:
+                    break
+            plt.savefig(f"cluster/images/frame_{i}.png")
+            plt.close()
+        exit(1)
 
     plt.show()
     plt.close()
     exit(1)
+
 
 class LLaMAVIDMetaForCausalLM(ABC):
 
@@ -338,78 +410,83 @@ class LLaMAVIDMetaForCausalLM(ABC):
     def get_vision_tower(self):
         return self.get_model().get_vision_tower()
 
-
     def encode_images(self, images, prompts=None, image_counts=None, long_video=False):
         if long_video:
             # use pre-computed features
             image_features = images
         else:
             image_features = self.get_model().get_vision_tower()(images)
-        cluster = False # Hard Coded, set to false when running normally
+        cluster = True  # Hard Coded, set to false when running normally
         if cluster:
-            tsne_viz2(image_features, images, plot_images=True)
-        image_features = self.vlm_attention(image_features, 
-                                            prompts=prompts, 
+            tsne_viz2(image_features, images, plot_images=False)
+        image_features = self.vlm_attention(image_features,
+                                            prompts=prompts,
                                             image_counts=image_counts,
-                                            long_video=long_video, images=images) #IMPORTANT: images should be None unless you want to plot top patches
+                                            long_video=long_video,
+                                            images=images)  #IMPORTANT: images should be None unless you want to plot top patches
         return image_features
 
     def vlm_attention(self, image_features, prompts=None, image_counts=None, long_video=False, images=None):
         img_feat_lst = []
         if image_counts is None:
-            assert len(image_features) == len(prompts), f"Size mismatch! image_features: {len(image_features)}, prompts: {len(prompts)}"
+            assert len(image_features) == len(
+                prompts), f"Size mismatch! image_features: {len(image_features)}, prompts: {len(prompts)}"
         else:
-            assert len(prompts) == len(image_counts), f"Size mismatch! prompts: {len(prompts)}, image_counts: {len(image_counts)}"
-        image_atts = torch.ones(image_features.size()[:-1], dtype=torch.long).to(image_features.device)    
+            assert len(prompts) == len(
+                image_counts), f"Size mismatch! prompts: {len(prompts)}, image_counts: {len(image_counts)}"
+        image_atts = torch.ones(image_features.size()[:-1], dtype=torch.long).to(image_features.device)
         #vector with ones, shape of image features minus hidden dimension
         total_count = 0
         # calculate each image feat according to the prompt
-        for _idx in range(len(prompts)): # for each text prompt
+        for _idx in range(len(prompts)):  # for each text prompt
             assert isinstance(prompts[_idx], list), f"Prompt should be a list, but got {type(prompts[_idx])}"
             input_token = self.get_model().vlm_att_tokenlizer(
-                prompts[_idx], 
-                padding='longest', 
+                prompts[_idx],
+                padding='longest',
                 truncation=True,
                 max_length=256,
                 return_tensors="pt"
-                ).to(image_features.device)
+            ).to(image_features.device)
             # input_token is BERT tokenizer tokens for inputting to qformer
             input_ids = input_token.input_ids
             attention_masks = input_token.attention_mask
-            
+
             if image_counts is None:
                 img_feat_prompt = image_features[_idx, None].expand(len(prompts[_idx]), -1, -1)
                 img_att_prompt = image_atts[_idx, None].expand(len(prompts[_idx]), -1)
             else:
                 # shape: [prompt_num*frame_num, image_shape, feat_dim]
-                img_feat_prompt = image_features[total_count:total_count+image_counts[_idx]]
-                img_feat_prompt = img_feat_prompt[None].expand(len(prompts[_idx]), -1, -1, -1).flatten(0,1) #equal to image_features if just one video
-                img_att_prompt = image_atts[total_count:total_count+image_counts[_idx]]
-                img_att_prompt = img_att_prompt[None].expand(len(prompts[_idx]), -1, -1).flatten(0,1) #equal to image_atts if just one video
-                input_ids = input_ids[:,None].expand(-1, image_counts[_idx], -1).flatten(0,1) #same here
-                attention_masks = attention_masks[:,None].expand(-1, image_counts[_idx], -1).flatten(0,1) #same here
+                img_feat_prompt = image_features[total_count:total_count + image_counts[_idx]]
+                img_feat_prompt = img_feat_prompt[None].expand(len(prompts[_idx]), -1, -1, -1).flatten(0,
+                                                                                                       1)  #equal to image_features if just one video
+                img_att_prompt = image_atts[total_count:total_count + image_counts[_idx]]
+                img_att_prompt = img_att_prompt[None].expand(len(prompts[_idx]), -1, -1).flatten(0,
+                                                                                                 1)  #equal to image_atts if just one video
+                input_ids = input_ids[:, None].expand(-1, image_counts[_idx], -1).flatten(0, 1)  #same here
+                attention_masks = attention_masks[:, None].expand(-1, image_counts[_idx], -1).flatten(0, 1)  #same here
                 total_count += image_counts[_idx]
-            
+
             if "pretrain" in self.config.bert_type and self.get_model().vlm_att_bert_proj is not None:
                 bert_feat = self.get_model().vlm_att_bert_proj(img_feat_prompt)
             else:
-                bert_feat = img_feat_prompt.clone() #with qformer is the same as img_feats
+                bert_feat = img_feat_prompt.clone()  #with qformer is the same as img_feats
 
             # remove cls embedding
             if self.config.mm_vision_select_feature == 'patch':
-                if img_feat_prompt.shape[1]%2 == 1:
+                if img_feat_prompt.shape[1] % 2 == 1:
                     img_feat_prompt = img_feat_prompt[:, 1:]
 
             if "qformer" in self.config.bert_type:
-                query_tokens = self.get_model().vlm_att_query.expand(bert_feat.shape[0], -1, -1) #expand to correct number of frames from video
-                query_atts = torch.cat([torch.ones(query_tokens.size()[:-1], dtype=torch.long).to(bert_feat.device), 
-                                        attention_masks],dim=1) #attention masks for qformer input
-                
+                query_tokens = self.get_model().vlm_att_query.expand(bert_feat.shape[0], -1,
+                                                                     -1)  #expand to correct number of frames from video
+                query_atts = torch.cat([torch.ones(query_tokens.size()[:-1], dtype=torch.long).to(bert_feat.device),
+                                        attention_masks], dim=1)  #attention masks for qformer input
+
                 if 'pretrain' in self.config.bert_type:
                     mm_img_in = self.get_model().vlm_att_ln(bert_feat)
                 else:
                     mm_img_in = bert_feat
-                
+
                 if long_video:
                     outputs = []
                     block_size = 64
@@ -423,7 +500,7 @@ class LLaMAVIDMetaForCausalLM(ABC):
                             encoder_attention_mask=img_att_prompt[L:R],
                             return_dict=True,
                         )
-                        mm_output = mm_output.last_hidden_state[:,:query_tokens.shape[1]]
+                        mm_output = mm_output.last_hidden_state[:, :query_tokens.shape[1]]
                         outputs.append(mm_output)
                     mm_output = torch.cat(outputs)
                     torch.cuda.empty_cache()
@@ -436,13 +513,14 @@ class LLaMAVIDMetaForCausalLM(ABC):
                         encoder_attention_mask=img_att_prompt,
                         return_dict=True,
                     )
-                    mm_output = mm_output.last_hidden_state[:,:query_tokens.shape[1]] #ignore actual text output tokens and get only image related tokens. left side of qformer
-                
+                    mm_output = mm_output.last_hidden_state[:, :query_tokens.shape[
+                        1]]  #ignore actual text output tokens and get only image related tokens. left side of qformer
+
             elif "raw" in self.config.bert_type:
-                if self.config.mm_vision_select_feature == 'patch' and bert_feat.shape[1]%2 == 1:
+                if self.config.mm_vision_select_feature == 'patch' and bert_feat.shape[1] % 2 == 1:
                     bert_feat = bert_feat[:, 1:]
                     img_att_prompt = img_att_prompt[:, 1:]
-                
+
                 mm_output = self.get_model().vlm_att_encoder.bert(
                     input_ids,
                     attention_mask=attention_masks,
@@ -453,19 +531,20 @@ class LLaMAVIDMetaForCausalLM(ABC):
                 mm_output = mm_output.last_hidden_state
             else:
                 raise ValueError(f'Unexpected bert type: {self.config.bert_type}')
-            
-            text_q = self.get_model().vlm_att_projector(mm_output) #linear projector from context attnetion. Not projection for LLM
-            final_token = self.token_generation(text_q, img_feat_prompt, long_video=long_video, images= images)
+
+            text_q = self.get_model().vlm_att_projector(
+                mm_output)  #linear projector from context attnetion. Not projection for LLM
+            final_token = self.token_generation(text_q, img_feat_prompt, long_video=long_video, images=images)
 
             if image_counts is not None:
                 # shape: [prompt_num, frame_num*image_shape, feat_dim]
                 final_token = final_token.reshape(len(prompts[_idx]), image_counts[_idx], *final_token.shape[-2:])
-                final_token = final_token.flatten(1,2)
+                final_token = final_token.flatten(1, 2)
             img_feat_lst.append(final_token)
 
         return img_feat_lst
 
-    def top_patches(self, ctx_embed, top_k=20):
+    def top_patches(self, ctx_embed, top_k=20, top_k_frames=5):
         # Ensure the input tensor is a PyTorch tensor
         assert isinstance(ctx_embed, torch.Tensor), "Input must be a PyTorch tensor"
 
@@ -482,7 +561,7 @@ class LLaMAVIDMetaForCausalLM(ABC):
         ctx_embed = ctx_embed.mean(-1)
 
         # Calculate the top 5 frames
-        _, top_indices_frames = torch.topk(ctx_embed, top_k, dim=-1)
+        _, top_indices_frames = torch.topk(ctx_embed, top_k_frames, dim=-1)
 
         return top_indices, top_indices_frames
 
@@ -540,13 +619,14 @@ class LLaMAVIDMetaForCausalLM(ABC):
             fig, ax = plt.subplots(1)
             # Display the image
             ax.imshow(images[i].permute(1, 2, 0).cpu().numpy().astype('float64'))
+
     def token_generation(self, text_q, vis_embed, long_video=False, images=None):
         ctx_embed = self.get_model().vlm_att_key_projector(vis_embed)
         # Key part 1: calculate context-related embedding
         ctx_embed = text_q @ ctx_embed.transpose(-1, -2)
         ctx_embed = ctx_embed / (vis_embed.shape[-1] ** 0.5)
         if images is not None:
-            top_indices, top_indices_frames = self.top_patches(ctx_embed, top_k=40)
+            top_indices, top_indices_frames = self.top_patches(ctx_embed, top_k=50, top_k_frames=12)
             cluster = False
             if cluster:
                 tsne_viz2(vis_embed, images, plot_images=False, top_indices=top_indices)
@@ -557,34 +637,34 @@ class LLaMAVIDMetaForCausalLM(ABC):
         else:
             block_size = 64
             outputs = []
-            ctx_score = ctx_embed.softmax(-1)    
+            ctx_score = ctx_embed.softmax(-1)
             for L in range(0, len(ctx_score), block_size):
                 R = L + block_size
                 sub_embed = (ctx_score[L:R] @ vis_embed[L:R]).mean(1)
                 outputs.append(sub_embed)
             ctx_embed = torch.cat(outputs)
             torch.cuda.empty_cache()
-        ctx_embed = self.get_model().vlm_att_val_projector(ctx_embed[:,None])
+        ctx_embed = self.get_model().vlm_att_val_projector(ctx_embed[:, None])
 
         # Key part 2: calculate visual embedding
         if self.config.compress_type is not None:
             if 'grid' in self.config.compress_type:
                 grid_size = int(self.config.compress_type.split('grid:')[-1])
-                cur_shape = int(vis_embed.shape[1]**0.5)
+                cur_shape = int(vis_embed.shape[1] ** 0.5)
                 assert grid_size > 1, f'Grid size should be larger than 1, but got {grid_size}'
                 vis_embed = vis_embed.reshape(vis_embed.shape[0], cur_shape, cur_shape, -1)
                 grid_stride = cur_shape // grid_size
-                vis_embed = F.avg_pool2d(vis_embed.permute(0, 3, 1, 2), 
+                vis_embed = F.avg_pool2d(vis_embed.permute(0, 3, 1, 2),
                                          padding=0,
-                                         kernel_size=grid_stride, 
+                                         kernel_size=grid_stride,
                                          stride=grid_stride)
-                
-                vis_embed = vis_embed.permute(0, 2, 3, 1).flatten(1,2)
+
+                vis_embed = vis_embed.permute(0, 2, 3, 1).flatten(1, 2)
             elif 'mean' in self.config.compress_type:
                 vis_embed = vis_embed.mean(dim=1, keepdim=True)
-        
+
         # concat token in shape (B, n+1, C)
-        vis_embed = self.get_model().mm_projector(vis_embed)                
+        vis_embed = self.get_model().mm_projector(vis_embed)
         final_token = torch.cat([ctx_embed, vis_embed], dim=1)
         return final_token
 
@@ -592,17 +672,19 @@ class LLaMAVIDMetaForCausalLM(ABC):
         self.prompts = prompts
 
     def prepare_inputs_labels_for_multimodal(
-        self, input_ids, attention_mask, past_key_values, labels, images, prompts=None
-    ): 
+            self, input_ids, attention_mask, past_key_values, labels, images, prompts=None
+    ):
         if prompts is None and hasattr(self, 'prompts'):
             prompts = self.prompts
-        
+
         vision_tower = self.get_vision_tower()
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
-            if past_key_values is not None and vision_tower is not None and images is not None and input_ids.shape[1] == 1:
-                attention_mask = torch.ones((attention_mask.shape[0], past_key_values[-1][-1].shape[-2] + 1), dtype=attention_mask.dtype, device=attention_mask.device)
+            if past_key_values is not None and vision_tower is not None and images is not None and input_ids.shape[
+                1] == 1:
+                attention_mask = torch.ones((attention_mask.shape[0], past_key_values[-1][-1].shape[-2] + 1),
+                                            dtype=attention_mask.dtype, device=attention_mask.device)
             return input_ids, attention_mask, past_key_values, None, labels
-        
+
         # pre-process images for long video
         if images[0].shape[-1] > 1000:
             long_video = True
@@ -639,14 +721,14 @@ class LLaMAVIDMetaForCausalLM(ABC):
                     new_labels.append(labels[batch_idx])
                 cur_image_idx += 1
                 continue
-            
+
             image_token_indices = torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0]
             cur_new_input_embeds = []
             if labels is not None:
                 cur_labels = labels[batch_idx]
                 cur_new_labels = []
                 assert cur_labels.shape == cur_input_ids.shape
-            
+
             if not long_video:
                 token_idx = 0
                 while image_token_indices.numel() > 0:
@@ -655,35 +737,45 @@ class LLaMAVIDMetaForCausalLM(ABC):
                     else:
                         cur_image_features = image_features[cur_image_idx]
                     image_token_start = image_token_indices[0]
-                    
-                    if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
-                        cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids[:image_token_start-1]).detach())
-                        cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids[image_token_start-1:image_token_start]))
+
+                    if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config,
+                                                                                      'mm_use_im_start_end', False):
+                        cur_new_input_embeds.append(
+                            self.get_model().embed_tokens(cur_input_ids[:image_token_start - 1]).detach())
+                        cur_new_input_embeds.append(
+                            self.get_model().embed_tokens(cur_input_ids[image_token_start - 1:image_token_start]))
                         cur_new_input_embeds.append(cur_image_features)
-                        cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids[image_token_start+1:image_token_start+2]))
+                        cur_new_input_embeds.append(
+                            self.get_model().embed_tokens(cur_input_ids[image_token_start + 1:image_token_start + 2]))
                         if labels is not None:
                             cur_new_labels.append(cur_labels[:image_token_start])
-                            cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=labels.device, dtype=labels.dtype))
-                            cur_new_labels.append(cur_labels[image_token_start:image_token_start+1])
-                            cur_labels = cur_labels[image_token_start+2:]
+                            cur_new_labels.append(
+                                torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=labels.device,
+                                           dtype=labels.dtype))
+                            cur_new_labels.append(cur_labels[image_token_start:image_token_start + 1])
+                            cur_labels = cur_labels[image_token_start + 2:]
                     else:
                         cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids[:image_token_start]))
                         cur_new_input_embeds.append(cur_image_features)
                         if labels is not None:
                             cur_new_labels.append(cur_labels[:image_token_start])
-                            cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=labels.device, dtype=labels.dtype))
-                            cur_labels = cur_labels[image_token_start+1:]
-                    if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
-                        cur_input_ids = cur_input_ids[image_token_start+2:]
+                            cur_new_labels.append(
+                                torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=labels.device,
+                                           dtype=labels.dtype))
+                            cur_labels = cur_labels[image_token_start + 1:]
+                    if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config,
+                                                                                      'mm_use_im_start_end', False):
+                        cur_input_ids = cur_input_ids[image_token_start + 2:]
                     else:
-                        cur_input_ids = cur_input_ids[image_token_start+1:]
+                        cur_input_ids = cur_input_ids[image_token_start + 1:]
                     image_token_indices = torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0]
                     token_idx += 1
-                
+
                 # changle image idx after processing one sample
                 cur_image_idx += 1
                 if cur_input_ids.numel() > 0:
-                    if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
+                    if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config,
+                                                                                      'mm_use_im_start_end', False):
                         cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids).detach())
                     else:
                         cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids))
@@ -696,15 +788,18 @@ class LLaMAVIDMetaForCausalLM(ABC):
                     cur_new_labels = torch.cat(cur_new_labels, dim=0)
                     new_labels.append(cur_new_labels)
             else:
-                cur_new_input_embeds = torch.Tensor(len(cur_input_ids), self.config.hidden_size).to(dtype=self.dtype, device=self.device)
+                cur_new_input_embeds = torch.Tensor(len(cur_input_ids), self.config.hidden_size).to(dtype=self.dtype,
+                                                                                                    device=self.device)
                 text_token_indices = torch.where(cur_input_ids != IMAGE_TOKEN_INDEX)[0]
                 if not self.training and self.get_model().embed_tokens.weight.device != cur_input_ids.device:
                     model_device = self.get_model().embed_tokens.weight.device
                     data_device = cur_input_ids.device
                     cur_input_ids_text = cur_input_ids[text_token_indices].to(device=model_device)
-                    cur_new_input_embeds[text_token_indices] = self.get_model().embed_tokens(cur_input_ids_text).to(device=data_device)
+                    cur_new_input_embeds[text_token_indices] = self.get_model().embed_tokens(cur_input_ids_text).to(
+                        device=data_device)
                 else:
-                    cur_new_input_embeds[text_token_indices] = self.get_model().embed_tokens(cur_input_ids[text_token_indices])
+                    cur_new_input_embeds[text_token_indices] = self.get_model().embed_tokens(
+                        cur_input_ids[text_token_indices])
                 cur_image_features = image_features[cur_image_idx]
                 cur_new_input_embeds[image_token_indices] = cur_image_features
                 new_input_embeds.append(cur_new_input_embeds)
@@ -717,7 +812,9 @@ class LLaMAVIDMetaForCausalLM(ABC):
 
             new_input_embeds_align = []
             for cur_new_embed in new_input_embeds:
-                cur_new_embed = torch.cat((cur_new_embed, torch.zeros((max_len - cur_new_embed.shape[0], cur_new_embed.shape[1]), dtype=cur_new_embed.dtype, device=cur_new_embed.device)), dim=0)
+                cur_new_embed = torch.cat((cur_new_embed,
+                                           torch.zeros((max_len - cur_new_embed.shape[0], cur_new_embed.shape[1]),
+                                                       dtype=cur_new_embed.dtype, device=cur_new_embed.device)), dim=0)
                 new_input_embeds_align.append(cur_new_embed)
             new_input_embeds = torch.stack(new_input_embeds_align, dim=0)
 
@@ -725,28 +822,38 @@ class LLaMAVIDMetaForCausalLM(ABC):
                 new_labels_align = []
                 _new_labels = new_labels
                 for cur_new_label in new_labels:
-                    cur_new_label = torch.cat((cur_new_label, torch.full((max_len - cur_new_label.shape[0],), IGNORE_INDEX, dtype=cur_new_label.dtype, device=cur_new_label.device)), dim=0)
+                    cur_new_label = torch.cat((cur_new_label,
+                                               torch.full((max_len - cur_new_label.shape[0],), IGNORE_INDEX,
+                                                          dtype=cur_new_label.dtype, device=cur_new_label.device)),
+                                              dim=0)
                     new_labels_align.append(cur_new_label)
                 new_labels = torch.stack(new_labels_align, dim=0)
 
             # only used for right padding in tokenlizer
             if attention_mask is not None:
                 new_attention_mask = []
-                for cur_attention_mask, cur_new_labels, cur_new_labels_align in zip(attention_mask, _new_labels, new_labels):
-                    new_attn_mask_pad_left = torch.full((cur_new_labels.shape[0] - labels.shape[1],), True, dtype=attention_mask.dtype, device=attention_mask.device)
-                    new_attn_mask_pad_right = torch.full((cur_new_labels_align.shape[0] - cur_new_labels.shape[0],), False, dtype=attention_mask.dtype, device=attention_mask.device)
-                    cur_new_attention_mask = torch.cat((new_attn_mask_pad_left, cur_attention_mask, new_attn_mask_pad_right), dim=0)
+                for cur_attention_mask, cur_new_labels, cur_new_labels_align in zip(attention_mask, _new_labels,
+                                                                                    new_labels):
+                    new_attn_mask_pad_left = torch.full((cur_new_labels.shape[0] - labels.shape[1],), True,
+                                                        dtype=attention_mask.dtype, device=attention_mask.device)
+                    new_attn_mask_pad_right = torch.full((cur_new_labels_align.shape[0] - cur_new_labels.shape[0],),
+                                                         False, dtype=attention_mask.dtype,
+                                                         device=attention_mask.device)
+                    cur_new_attention_mask = torch.cat(
+                        (new_attn_mask_pad_left, cur_attention_mask, new_attn_mask_pad_right), dim=0)
                     new_attention_mask.append(cur_new_attention_mask)
                 attention_mask = torch.stack(new_attention_mask, dim=0)
                 assert attention_mask.shape == new_labels.shape
         else:
             new_input_embeds = torch.stack(new_input_embeds, dim=0)
             if labels is not None:
-                new_labels  = torch.stack(new_labels, dim=0)
+                new_labels = torch.stack(new_labels, dim=0)
 
             # only used for right padding in tokenlizer
             if attention_mask is not None:
-                new_attn_mask_pad_left = torch.full((attention_mask.shape[0], new_input_embeds.shape[1] - input_ids.shape[1]), True, dtype=attention_mask.dtype, device=attention_mask.device)
+                new_attn_mask_pad_left = torch.full(
+                    (attention_mask.shape[0], new_input_embeds.shape[1] - input_ids.shape[1]), True,
+                    dtype=attention_mask.dtype, device=attention_mask.device)
                 attention_mask = torch.cat((new_attn_mask_pad_left, attention_mask), dim=1)
                 assert attention_mask.shape == new_input_embeds.shape[:2]
 
@@ -788,7 +895,8 @@ class LLaMAVIDMetaForCausalLM(ABC):
                 elif embed_tokens_weight.shape[0] == num_new_tokens:
                     input_embeddings[-num_new_tokens:] = embed_tokens_weight
                 else:
-                    raise ValueError(f"Unexpected embed_tokens_weight shape. Pretrained: {embed_tokens_weight.shape}. Current: {input_embeddings.shape}. Numer of new tokens: {num_new_tokens}.")
+                    raise ValueError(
+                        f"Unexpected embed_tokens_weight shape. Pretrained: {embed_tokens_weight.shape}. Current: {input_embeddings.shape}. Numer of new tokens: {num_new_tokens}.")
         elif model_args.mm_use_im_patch_token:
             if model_args.tune_mm_mlp_adapter:
                 for p in self.get_input_embeddings().parameters():

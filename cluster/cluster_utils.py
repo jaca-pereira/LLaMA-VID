@@ -43,7 +43,7 @@ def pairwise_distance(data1, data2, metric='euclidean',
 
 @torch.cuda.amp.custom_fwd(cast_inputs=torch.float32)
 def pairwise_distance_st(data1, data2, data1_s, data2_s, data1_t, data2_t, metric='euclidean',
-                      self_nearest=True, all_negative=False, p=2.0, lambdas=[1.0, 0.0, 0.0]):
+                      self_nearest=True, all_negative=False, p=2.0, lambdas=[1, 0, 1]):
     """
     pairwise distance
     Args:
@@ -68,13 +68,20 @@ def pairwise_distance_st(data1, data2, data1_s, data2_s, data1_t, data2_t, metri
     else:
         raise NotImplementedError("{} metric is not implemented".format(metric))
 
-    dis_s = torch.sub(data1_s, data2_s)
-    dis_t = torch.sub(data1_t, data2_t)
+    dis_s = torch.cdist(data1_s, data2_s, p=p)
+    dis_t = torch.cdist(data1_t, data2_t, p=p)
 
     if all_negative:
         dis = dis - torch.max(dis) - 1.0
         dis_s = dis_s - torch.max(dis_s) - 1.0
         dis_t = dis_t - torch.max(dis_t) - 1.0
+
+    # Normalize dis_s and dis_t
+    dis_min = torch.min(dis)
+    dis_max = torch.max(dis)
+
+    dis_s = (dis_s - dis_min) / (dis_max - dis_min)
+    dis_t = (dis_t - dis_min) / (dis_max - dis_min)
 
     dis = dis * lambdas[0] + dis_s * lambdas[1] + dis_t * lambdas[2]
 
