@@ -8,6 +8,8 @@ echo $CONDA_DEFAULT_ENV
 
 cd ~/data/LLaMA-VID
 
+wandb login a5569ff69ae6ef0b1d94c04c83e390de9c453efd
+
 deepspeed llamavid/train/train_mem.py \
     --deepspeed ./scripts/zero2_offload.json \
     --model_name_or_path model_zoo/LLM/vicuna/7B-V1.5 \
