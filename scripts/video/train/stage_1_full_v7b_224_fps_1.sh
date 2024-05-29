@@ -24,7 +24,7 @@ deepspeed --module llamavid.train.train_mem \
     --mm_use_im_patch_token False \
     --video_fps 1 \
     --bf16 True \
-    --output_dir ./work_dirs/llama-vid-7b-pretrain-224-video-fps-1 \
+    --output_dir ./work_dirs/llama-vid-token-reduction-7b-pretrain-224-video-fps-1 \
     --num_train_epochs 1 \
     --per_device_train_batch_size 32 \
     --per_device_eval_batch_size 32 \
