@@ -8,13 +8,11 @@ echo $CONDA_DEFAULT_ENV
 
 cd ~/data/LLaMA-VID
 
-wandb login a5569ff69ae6ef0b1d94c04c83e390de9c453efd
-
-deepspeed --module llamavid.train.train_mem \
+deepspeed llamavid/train/train_mem.py \
     --deepspeed ./scripts/zero2_offload.json \
     --model_name_or_path model_zoo/LLM/vicuna/7B-V1.5 \
     --version imgsp_v1 \
-    --data_path ./data/LLaMA-VID-Finetune/llava_v1_5_mix665k_with_video_chatgpt_maxtime_5min_features.json \
+    --data_path ./data/LLaMA-VID-Finetune/subsample_llava_v1_5_mix665k_with_video_chatgpt_maxtime_5min.json \
     --image_folder ./data/LLaMA-VID-Finetune \
     --video_folder ./data/LLaMA-VID-Finetune \
     --vision_tower ./model_zoo/LAVIS/eva_vit_g.pth \
@@ -27,15 +25,12 @@ deepspeed --module llamavid.train.train_mem \
     --image_aspect_ratio pad \
     --group_by_modality_length True \
     --video_fps 1 \
-    --bert_type "qformer_pretrain" \
-    --num_query 32 \
-    --compress_type "mean" \
     --bf16 True \
     --output_dir ./work_dirs/llama-vid-7b-full-224-video-fps-1  \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 1 \
-    --per_device_eval_batch_size 1 \
-    --gradient_accumulation_steps 32 \
+    --per_device_train_batch_size 2 \
+    --per_device_eval_batch_size 2 \
+    --gradient_accumulation_steps 8 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
     --save_steps 500 \
@@ -48,6 +43,6 @@ deepspeed --module llamavid.train.train_mem \
     --tf32 True \
     --model_max_length 2048 \
     --gradient_checkpointing True \
-    --dataloader_num_workers 1 \
+    --dataloader_num_workers 4 \
     --lazy_preprocess True \
     --report_to wandb

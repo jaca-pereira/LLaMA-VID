@@ -69,10 +69,6 @@ class ModelArguments:
     mm_use_im_start_end: bool = field(default=False)
     mm_use_im_patch_token: bool = field(default=True)
     mm_vision_select_feature: Optional[str] = field(default="patch")
-    bert_type: Optional[str] = field(default="qformer_pretrain")
-    num_query: Optional[int] = field(default=32)
-    pretrain_qformer: Optional[str] = field(default=None)
-    compress_type: Optional[str] = field(default=None)
 
 
 @dataclass
@@ -184,7 +180,7 @@ def get_mm_adapter_state_maybe_zero_3(named_params, keys_to_match):
 def find_all_linear_names(model):
     cls = torch.nn.Linear
     lora_module_names = set()
-    multimodal_keywords = ['mm_projector', 'vision_tower', 'vision_resampler', 'vlm_att']
+    multimodal_keywords = ['mm_projector', 'vision_tower', 'vision_resampler'] #REMOVED VLM_ATT
     for name, module in model.named_modules():
         if any(mm_keyword in name for mm_keyword in multimodal_keywords):
             continue
@@ -204,7 +200,7 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
     if getattr(trainer.args, "tune_mm_mlp_adapter", False):
         # Only save Adapter
         # keys_to_match = ['mm_projector']
-        keys_to_match = ['mm_projector', 'vision_resampler', 'vlm_att']
+        keys_to_match = ['mm_projector', 'vision_resampler']  #REMOVED VLM_ATT
         if getattr(trainer.args, "use_im_start_end", False):
             keys_to_match.extend(['embed_tokens', 'embed_in'])
 
@@ -1202,12 +1198,12 @@ def train():
         model.config.mm_use_im_start_end = data_args.mm_use_im_start_end = model_args.mm_use_im_start_end
         training_args.use_im_start_end = model_args.mm_use_im_start_end
         model.config.mm_use_im_patch_token = model_args.mm_use_im_patch_token
+
         model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
 
         # initialize token merging HERE
-        model.initialize_token_merging(model_args)
-    # all the attention modules require grad
-    """model.get_model().initialize_attention_modules(model_args)"""
+        model.get_model().initialize_token_reduction()
+
 
     if training_args.bits in [4, 8]:
         from peft.tuners.lora import LoraLayer

@@ -97,11 +97,7 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
         vision_tower.to(device=device, dtype=torch.float16)
         image_processor = vision_tower.image_processor
 
-        # initialize attention modules
-        """
-        model.config.model_path = model_path
-        model.get_model().initialize_attention_modules(model.config, for_eval=True)
-        """
+    model.get_model().initialize_token_reduction()
     if hasattr(model.config, "max_sequence_length"):
         context_len = model.config.max_sequence_length
     else:

@@ -8,8 +8,6 @@ echo $CONDA_DEFAULT_ENV
 
 cd ~/data/LLaMA-VID
 
-wandb login a5569ff69ae6ef0b1d94c04c83e390de9c453efd
-
 deepspeed --module llamavid.train.train_mem \
     --deepspeed ./scripts/zero2.json \
     --model_name_or_path model_zoo/LLM/vicuna/7B-V1.5 \
@@ -25,15 +23,11 @@ deepspeed --module llamavid.train.train_mem \
     --mm_use_im_start_end False \
     --mm_use_im_patch_token False \
     --video_fps 1 \
-    --bert_type "qformer_pretrain_freeze" \
-    --num_query 32 \
-    --pretrain_qformer model_zoo/LAVIS/instruct_blip_vicuna7b_trimmed.pth \
-    --compress_type "mean" \
     --bf16 True \
     --output_dir ./work_dirs/llama-vid-7b-pretrain-224-video-fps-1 \
     --num_train_epochs 1 \
     --per_device_train_batch_size 8 \
-    --per_device_eval_batch_size 2 \
+    --per_device_eval_batch_size 8 \
     --gradient_accumulation_steps 4 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
@@ -68,9 +62,6 @@ deepspeed llamavid/train/train_mem.py \
     --image_aspect_ratio pad \
     --group_by_modality_length True \
     --video_fps 1 \
-    --bert_type "qformer_pretrain" \
-    --num_query 32 \
-    --compress_type "mean" \
     --bf16 True \
     --output_dir ./work_dirs/llama-vid-7b-full-224-video-fps-1  \
     --num_train_epochs 1 \
