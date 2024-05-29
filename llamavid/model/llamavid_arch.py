@@ -155,8 +155,8 @@ class LLaMAVIDMetaModel:
             else:
                 model_save_path = model_args.model_path
             model_idx_path = getattr(model_args, 'model_path', model_save_path)
-            project_root_dir = os.getcwd()
-            model_idx_path = os.path.join(project_root_dir, "work_dirs/llama-vid/llama-vid-13b-full-224-video-fps-1/snapshots/3ce9a9e67e439a56ca3ac1aabdd4724afd833f82")
+            #project_root_dir = os.getcwd()
+            #model_idx_path = os.path.join(project_root_dir, "work_dirs/llama-vid/llama-vid-13b-full-224-video-fps-1/snapshots/3ce9a9e67e439a56ca3ac1aabdd4724afd833f82")
             weight_file = json.load(open(os.path.join(model_idx_path, 'pytorch_model.bin.index.json'), 'r'))['weight_map']
             model_path = set([weight_file[_key] for _key in weight_file if any([_module in _key for _module in trainable_module])])
             att_projector_weights = {}

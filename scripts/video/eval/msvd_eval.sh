@@ -14,7 +14,7 @@ IFS=',' read -ra GPULIST <<< "$gpu_list"
 
 CHUNKS=${#GPULIST[@]}
 
-CKPT="llama-vid/llama-vid-7b-full-224-video-fps-1"
+CKPT="llama-vid-7b-full-224-video-fps-1"
 #OPENAIKEY=""
 #OPENAIBASE=""
 
