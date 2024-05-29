@@ -48,8 +48,17 @@ def bipartite_soft_matching(
 
     with torch.no_grad():
         metric = metric / metric.norm(dim=-1, keepdim=True)
+
+        tokens_per_frame = 256
+        num_frames = metric.shape[1] // tokens_per_frame
+        frames = torch.arange(num_frames).repeat(tokens_per_frame, 1).T.reshape(-1).to(metric.device)
+        penalty_matrix = torch.abs(frames[:, None] - frames[None, :])
+
+
         a, b = metric[..., ::2, :], metric[..., 1::2, :]
         scores = a @ b.transpose(-1, -2)
+
+        scores = scores - penalty_matrix
 
         if class_token:
             scores[..., 0, :] = -math.inf
