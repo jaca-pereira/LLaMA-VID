@@ -6,7 +6,7 @@ conda activate llamavid
 
 echo $CONDA_DEFAULT_ENV
 
-cd ~/Desktop/LLaMA-VID
+cd ~/data/LLaMA-VID
 
 CUDA_VISIBLE_DEVICES='0,1'
 gpu_list="${CUDA_VISIBLE_DEVICES:-0}"
