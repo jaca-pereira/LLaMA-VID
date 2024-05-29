@@ -26,9 +26,9 @@ deepspeed --module llamavid.train.train_mem \
     --bf16 True \
     --output_dir ./work_dirs/llama-vid-7b-pretrain-224-video-fps-1 \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 8 \
-    --per_device_eval_batch_size 8 \
-    --gradient_accumulation_steps 4 \
+    --per_device_train_batch_size 32 \
+    --per_device_eval_batch_size 32 \
+    --gradient_accumulation_steps 1 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
     --save_steps 500 \
