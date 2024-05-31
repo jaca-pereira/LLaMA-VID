@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 
 
-def prune_top_k_tokens(video_tokens: torch.Tensor, text_tokens: torch.Tensor, k: int):
+def prune_top_k_tokens(video_tokens: torch.Tensor, text_tokens: torch.Tensor, k: int, labels: torch.Tensor=None):
     """
     Returns the top_k video tokens that have the highest average cosine similarity with the text tokens.
     """
@@ -22,5 +22,8 @@ def prune_top_k_tokens(video_tokens: torch.Tensor, text_tokens: torch.Tensor, k:
 
     # Gather the top k tokens from the original video tokens
     top_k_tokens = video_tokens[top_k_idx]
-
-    return top_k_tokens
+    if labels is not None:
+        top_k_labels = labels[top_k_idx]
+    else:
+        top_k_labels = None
+    return top_k_tokens, top_k_labels

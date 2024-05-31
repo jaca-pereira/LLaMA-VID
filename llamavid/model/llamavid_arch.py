@@ -162,15 +162,12 @@ class LLaMAVIDMetaForCausalLM(ABC):
         else:
             image_features = self.encode_images(images, long_video=long_video)
 
-        #image_features_list = [image_features] * len(prompts)       #Replicates image features for each prompt, IMPORTANT, DOES IT WORK?
-        #image_features = image_features_list
-        #del image_features_list
+
         new_input_embeds = []
         new_labels = [] if labels is not None else None
         #cur_image_idx = 0
         for batch_idx, cur_input_ids in enumerate(input_ids):
             if (cur_input_ids == IMAGE_TOKEN_INDEX).sum() == 0:
-                print('No image token found in the input_ids')
                 # multimodal LLM, but the current sample is not multimodal
                 # FIXME: this is a hacky fix, for deepspeed zero3 to work
                 half_len = cur_input_ids.shape[0] // 2
@@ -197,11 +194,11 @@ class LLaMAVIDMetaForCausalLM(ABC):
                 assert cur_labels.shape == cur_input_ids.shape
             
             if not long_video:
-                token_idx = 0
+
                 while image_token_indices.numel() > 0:
                     if isinstance(image_features, list):
-                        #cur_image_features = image_features[cur_image_idx][token_idx]
-                        cur_image_features = image_features[token_idx]
+                        #cur_image_features = image_features[cur_image_idx][0]
+                        cur_image_features = image_features[0]
                     else:
                         #cur_image_features = image_features[cur_image_idx]
                         cur_image_features = image_features
@@ -229,7 +226,7 @@ class LLaMAVIDMetaForCausalLM(ABC):
                     else:
                         cur_input_ids = cur_input_ids[image_token_start+1:]
                     image_token_indices = torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0]
-                    token_idx += 1
+
                 
                 # changle image idx after processing one sample
                 #cur_image_idx += 1
@@ -241,15 +238,18 @@ class LLaMAVIDMetaForCausalLM(ABC):
                     if labels is not None:
                         cur_new_labels.append(cur_labels)
                 cur_new_input_embeds = [x.to(device=self.device) for x in cur_new_input_embeds]
-                #ADDED TOKEN PRUNING
+                # ADDED TOKEN PRUNING
                 if self.config.mm_token_pruning:
                     system_size = cur_new_input_embeds[0].size(0)
                     video_size = cur_new_input_embeds[-2].size(0)
                     text_size = cur_new_input_embeds[-1].size(0)
                     top_k = max(0, self.config.max_position_embeddings - (system_size + text_size))
                     if top_k < video_size:
-                        cur_new_input_embeds[-2] = self.get_token_pruning()(cur_new_input_embeds[-2], cur_new_input_embeds[-1], top_k)
-
+                        if cur_new_labels is not None:
+                            cur_new_input_embeds[-2], cur_new_labels[-2] = self.get_token_pruning()(cur_new_input_embeds[-2],
+                                                                            cur_new_input_embeds[-1], top_k, cur_new_labels[-2])
+                        else:
+                            cur_new_input_embeds[-2], _ = self.get_token_pruning()(cur_new_input_embeds[-2], cur_new_input_embeds[-1], top_k)
                 cur_new_input_embeds = torch.cat(cur_new_input_embeds, dim=0)
                 new_input_embeds.append(cur_new_input_embeds)
                 if labels is not None:
@@ -275,7 +275,6 @@ class LLaMAVIDMetaForCausalLM(ABC):
                 #cur_image_idx += 1
 
         if any(x.shape != new_input_embeds[0].shape for x in new_input_embeds):
-            print('Different shapes in new_input_embeds')
             max_len = max(x.shape[0] for x in new_input_embeds)
 
             new_input_embeds_align = []
@@ -312,18 +311,6 @@ class LLaMAVIDMetaForCausalLM(ABC):
                 new_attn_mask_pad_left = torch.full((attention_mask.shape[0], new_input_embeds.shape[1] - input_ids.shape[1]), True, dtype=attention_mask.dtype, device=attention_mask.device)
                 attention_mask = torch.cat((new_attn_mask_pad_left, attention_mask), dim=1)
                 assert attention_mask.shape == new_input_embeds.shape[:2]
-
-        if self.config.mm_token_pruning and labels is not None: #TODO: check if this is correct
-            # aligns the labels size with the pruned tokens
-            max_len = max(x.shape[0] for x in new_input_embeds)
-            new_labels_align = []
-            _new_labels = new_labels
-            for cur_new_label in new_labels:
-                cur_new_label = torch.cat((cur_new_label, torch.full((max_len - cur_new_label.shape[0],), IGNORE_INDEX,
-                                                                     dtype=cur_new_label.dtype,
-                                                                     device=cur_new_label.device)), dim=0)
-                new_labels_align.append(cur_new_label)
-            new_labels = torch.stack(new_labels_align, dim=0)
 
 
         return None, attention_mask, past_key_values, new_input_embeds, new_labels
