@@ -77,7 +77,7 @@ class LlavaLlamaAttForCausalLM(LlamaForCausalLM, LLaMAVIDMetaForCausalLM):
             if input_ids.device != self.device:
                 input_ids = input_ids.to(device=self.device)
 
-        input_ids, attention_mask, past_key_values, inputs_embeds, labels = self.prepare_inputs_labels_for_multimodal(input_ids, attention_mask, past_key_values, labels, images)
+        input_ids, attention_mask, past_key_values, inputs_embeds, labels = self.prepare_inputs_labels_for_multimodal(input_ids, attention_mask, past_key_values, labels, images, prompts)
 
         torch.cuda.empty_cache()
 
@@ -93,20 +93,29 @@ class LlavaLlamaAttForCausalLM(LlamaForCausalLM, LLaMAVIDMetaForCausalLM):
             return_dict=return_dict
         )
 
+        print(f'inputs_embeds: {inputs_embeds.shape}')
+        print(f'outputs shape: {outputs[0].shape}')
         hidden_states = outputs[0]
         logits = self.lm_head(hidden_states)
-
+        print(f'logits: {logits.shape}')
+        print(f'labels: {labels.shape}')
         loss = None
         if labels is not None:
             # Shift so that tokens < n predict n
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
+            print(f'shift_logits shape after shifting: {shift_logits.shape}')
+            print(f'shift_labels shape after shifting: {shift_labels.shape}')
             # Flatten the tokens
             loss_fct = CrossEntropyLoss()
             shift_logits = shift_logits.view(-1, self.config.vocab_size)
             shift_labels = shift_labels.view(-1)
+            print(f'shift_logits shape after reshaping: {shift_logits.shape}')
+            print(f'shift_labels shape after reshaping: {shift_labels.shape}')
             # Enable model/pipeline parallelism
             shift_labels = shift_labels.to(shift_logits.device)
+            print(f'shift_logits device: {shift_logits.device}')
+            print(f'shift_labels device: {shift_labels.device}')
             loss = loss_fct(shift_logits, shift_labels)
 
         if not return_dict:
