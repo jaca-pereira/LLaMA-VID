@@ -5,7 +5,7 @@ import json
 import ast
 from multiprocessing.pool import Pool
 from tqdm import tqdm
-
+import time
 
 def parse_args():
     parser = argparse.ArgumentParser(description="question-answer-generation-using-gpt-3")
@@ -32,6 +32,7 @@ def annotate(prediction_set, caption_files, output_dir):
         answer = qa_set['a']
         pred = qa_set['pred']
         try:
+            time_0 = time.time()
             # Compute the correctness score
             completion = openai.ChatCompletion.create(
                 model="gpt-3.5-turbo",
@@ -65,7 +66,9 @@ def annotate(prediction_set, caption_files, output_dir):
             response_message = completion["choices"][0]["message"]["content"]
             response_dict = ast.literal_eval(response_message)
             result_qa_pair = [response_dict, qa_set]
-
+            time_1 = time.time()
+            total_time = time_1 - time_0
+            print(f"Total time of key {key} was {total_time}")
             # Save the question-answer pairs to a json file.
             with open(f"{output_dir}/{key}.json", "w") as f:
                 json.dump(result_qa_pair, f)
