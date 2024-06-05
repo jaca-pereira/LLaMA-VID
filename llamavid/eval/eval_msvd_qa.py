@@ -6,6 +6,36 @@ import ast
 from multiprocessing.pool import Pool
 from tqdm import tqdm
 import time
+import datetime
+import threading
+
+# Initialize a counter
+counter = 0
+# Initialize a flag for stopping the thread
+stop_thread = False
+# Initialize a limit for the number of requests per minute
+limit = 500
+def increment_counter():
+    global counter
+    counter += 1
+    if counter >= limit:
+        # Get the current time
+        now = datetime.datetime.now()
+        # Calculate the number of seconds left in the current minute
+        seconds_left = 60 - now.second
+        # Sleep for the remaining seconds
+        time.sleep(seconds_left)
+        # Reset the counter
+        counter = 0
+
+def reset_counter():
+    global counter, stop_thread
+    while True:
+        if stop_thread:
+            break
+        time.sleep(60)  # Wait for 60 seconds
+        print(f"Requests in the last minute: {counter}")
+        counter = 0  # Reset the counter
 
 def parse_args():
     parser = argparse.ArgumentParser(description="question-answer-generation-using-gpt-3")
@@ -62,6 +92,7 @@ def annotate(prediction_set, caption_files, output_dir):
                     }
                 ]
             )
+            increment_counter()
             # Convert response to a Python dictionary.
             response_message = completion["choices"][0]["message"]["content"]
             response_dict = ast.literal_eval(response_message)
@@ -76,6 +107,18 @@ def annotate(prediction_set, caption_files, output_dir):
         except Exception as e:
             print(f"Error processing file '{key}': {e}")
 
+def increment_counter():
+    global counter
+    counter += 1
+
+def reset_counter():
+    global counter, stop_thread
+    while True:
+        if stop_thread:
+            break
+        time.sleep(60)  # Wait for 60 seconds
+        print(f"Requests in the last minute: {counter}")
+        counter = 0  # Reset the counter
 
 def main():
     """
@@ -138,7 +181,9 @@ def main():
     if args.api_base:
         openai.api_base = args.api_base # Your API base here
     num_tasks = args.num_tasks
-
+    # Start a thread that will reset the counter every minute
+    counter_thread = threading.Thread(target=reset_counter, daemon=True)
+    counter_thread.start()
     # While loop to ensure that all captions are processed.
     while True:
         try:
@@ -168,6 +213,8 @@ def main():
         except Exception as e:
             print(f"Error: {e}")
 
+    stop_thread = True
+    counter_thread.join()
     # Combine all the processed files into one
     combined_contents = {}
     json_path = args.output_json
