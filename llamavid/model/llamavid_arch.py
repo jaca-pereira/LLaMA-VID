@@ -25,7 +25,7 @@ from .multimodal_projector.builder import build_vision_projector
 
 from llamavid.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 from .to_me.token_merging import kth_bipartite_soft_matching, merge_wavg
-from .to_me.token_pruning import prune_top_k_tokens
+from .to_me.token_pruning import prune_top_k_tokens, plot_source_top_k_tokens
 
 
 class LLaMAVIDMetaModel:
@@ -245,6 +245,8 @@ class LLaMAVIDMetaForCausalLM(ABC):
                     text_size = cur_new_input_embeds[-1].size(0)
                     top_k = max(0, self.config.max_position_embeddings - (system_size + text_size))
                     if top_k < video_size:
+                        if False: #TODO:  plotting should not be hard coded
+                            plot_source_top_k_tokens(cur_new_input_embeds[-2], cur_new_input_embeds[-1], images[0])
                         if cur_new_labels is not None:
                             cur_new_input_embeds[-2], cur_new_labels[-2] = self.get_token_pruning()(cur_new_input_embeds[-2],
                                                                             cur_new_input_embeds[-1], top_k, cur_new_labels[-2])
