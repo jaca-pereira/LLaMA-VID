@@ -1,9 +1,10 @@
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torch.nn.functional as F
 
 
-def prune_top_k_tokens(video_tokens: torch.Tensor, text_tokens: torch.Tensor, k: int, labels: torch.Tensor=None):
+def prune_top_k_tokens(video_tokens: torch.Tensor, text_tokens: torch.Tensor, k: int, labels: torch.Tensor = None):
     """
     Returns the top_k video tokens that have the highest average cosine similarity with the text tokens.
     """
@@ -13,7 +14,8 @@ def prune_top_k_tokens(video_tokens: torch.Tensor, text_tokens: torch.Tensor, k:
     normalized_text_tokens = text_tokens / text_tokens.norm(p=2, dim=-1, keepdim=True)
 
     # Calculate cosine similarity
-    sim = normalized_video_tokens @ normalized_text_tokens.transpose(-1, -2)  # shape becomes [batch_size, num_video_tokens, num_text_tokens]
+    sim = normalized_video_tokens @ normalized_text_tokens.transpose(-1,
+                                                                     -2)  # shape becomes [batch_size, num_video_tokens, num_text_tokens]
 
     # Calculate the sum cosine similarity
     sum_sim = torch.sum(sim, dim=-1)  # shape becomes [batch_size, num_video_tokens]
@@ -29,7 +31,9 @@ def prune_top_k_tokens(video_tokens: torch.Tensor, text_tokens: torch.Tensor, k:
         top_k_labels = None
     return top_k_tokens, top_k_labels
 
-def plot_source_top_k_tokens(video_tokens: torch.Tensor, text_tokens: torch.Tensor, video: torch.Tensor):
+
+def plot_source_top_k_tokens(video_tokens: torch.Tensor, text_tokens: torch.Tensor, video: torch.Tensor,
+                             source: torch.Tensor, k: int = 20):
     """
     Returns the top_k video tokens that have the highest average cosine similarity with the text tokens.
     """
@@ -38,14 +42,26 @@ def plot_source_top_k_tokens(video_tokens: torch.Tensor, text_tokens: torch.Tens
     normalized_text_tokens = text_tokens / text_tokens.norm(p=2, dim=-1, keepdim=True)
 
     # Calculate cosine similarity
-    sim = normalized_video_tokens @ normalized_text_tokens.transpose(-1, -2)  # shape becomes [batch_size, num_video_tokens, num_text_tokens]
+    sim = normalized_video_tokens @ normalized_text_tokens.transpose(-1,
+                                                                     -2)  # shape becomes [batch_size, num_video_tokens, num_text_tokens]
 
     # Calculate the sum cosine similarity
     sum_sim = torch.sum(sim, dim=-1)  # shape becomes [batch_size, num_video_tokens]
 
     # Get the indices of the top_k video tokens
-    _, top_k_idx = torch.topk(sum_sim, 10, dim=-1)  # shape becomes [batch_size, k]
-
+    _, top_k_idx = torch.topk(sum_sim, k, dim=-1)  # shape becomes [batch_size, k]
+    # get original source tokens for top_k_idx
+    source = source.squeeze(0)
+    source_topk_idx = source[top_k_idx]
+    for i in range(k):
+        map_idx = source_topk_idx[i]
+        top_k_idx_i = torch.where(map_idx == 1)
+        if len(top_k_idx_i[0]) == 0:
+            continue
+        elif len(top_k_idx_i[0]) == 1:
+            top_k_idx[i] = top_k_idx_i[0].item()
+        else:
+            top_k_idx[i] = top_k_idx_i[0][0].item()
     # Calculate frame indices and patch indices
     frame_indices = top_k_idx // 256
     patch_indices = top_k_idx % 256
@@ -55,12 +71,13 @@ def plot_source_top_k_tokens(video_tokens: torch.Tensor, text_tokens: torch.Tens
     col_indices = patch_indices % 16
 
     # plot the patches from video with the same indexes as top_k_idx tokens from video_tokens
-    fig, axs = plt.subplots(1, 10, figsize=(20, 5))
-    for i in range(10):
+    fig, axs = plt.subplots(1, k, figsize=(20, 5))
+    for i in range(k):
         frame_index = frame_indices[i].item()
         row_index = row_indices[i].item() * 14
         col_index = col_indices[i].item() * 14
-        patch = video[frame_index, :, row_index:row_index + 14, col_index:col_index + 14]  # assuming video is a [num_frames, channels, height, width] tensor
+        patch = video[frame_index, :, row_index:row_index + 14,
+                col_index:col_index + 14]  # assuming video is a [num_frames, channels, height, width] tensor
         patch = F.interpolate(patch.unsqueeze(0), size=(112, 112), mode='bilinear', align_corners=False)
         patch = patch.squeeze(0)
         patch = patch.permute(1, 2, 0).to('cpu').numpy().astype(float)

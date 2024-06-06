@@ -24,7 +24,7 @@ from .multimodal_encoder.builder import build_vision_tower
 from .multimodal_projector.builder import build_vision_projector
 
 from llamavid.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
-from .to_me.token_merging import kth_bipartite_soft_matching, merge_wavg
+from .to_me.token_merging import kth_bipartite_soft_matching, merge_wavg, merge_source
 from .to_me.token_pruning import prune_top_k_tokens, plot_source_top_k_tokens
 
 
@@ -86,10 +86,12 @@ class LLaMAVIDMetaModel:
             self.token_pruning = prune_top_k_tokens if self.config.mm_token_pruning else None
 
         self.config.mm_token_merging = getattr(self.config, 'mm_token_merging', True) #TODO change to false once config is set
+        self.config.mm_token_source = getattr(self.config, 'mm_token_source', True) #TODO change to false once config is set
         if self.config.mm_token_merging:
             self.config.mm_token_merging_kth = getattr(self.config, 'mm_token_merging_kth', 2)
             self.token_merge = kth_bipartite_soft_matching if self.config.mm_token_merging else None
             self.token_merge_wavg = merge_wavg if self.config.mm_token_merging else None
+            self.token_merge_source = merge_source if self.config.mm_token_source else None
 
 class LLaMAVIDMetaForCausalLM(ABC):
 
@@ -104,7 +106,8 @@ class LLaMAVIDMetaForCausalLM(ABC):
         return self.get_model().token_merge
     def get_token_merging_wavg(self):
         return self.get_model().token_merge_wavg
-
+    def get_token_merging_source(self):
+        return self.get_model().token_merge_source
     def get_token_pruning(self):
         return self.get_model().token_pruning
 
@@ -128,12 +131,18 @@ class LLaMAVIDMetaForCausalLM(ABC):
         #token merging
         if self.config.mm_token_merging:
             merge, _ = self.get_token_merging()(image_features, self.config.mm_token_merging_kth)
+            image_features_copy = image_features.clone()
             image_features, _ = self.get_token_merging_wavg()(merge, image_features, None)
-
+            if self.config.mm_token_source:
+                image_features_source = self.get_token_merging_source()(merge, image_features_copy, None)
+            else:
+                image_features_source = None
+        else:
+            image_features_source = None
         image_features = self.get_model().mm_projector(image_features)
         image_features = torch.squeeze(image_features, dim=0)
         image_features_list = [image_features]
-        return image_features_list
+        return image_features_list, image_features_source
 
     def update_prompt(self, prompts=None):
         self.prompts = prompts
@@ -158,9 +167,15 @@ class LLaMAVIDMetaForCausalLM(ABC):
             if not long_video:
                 images = [image if len(image.shape) == 4 else image.unsqueeze(0) for image in images]
             concat_images = torch.cat(images, dim=0)
-            image_features = self.encode_images(concat_images, long_video=long_video)
+            if self.config.mm_token_source:
+                image_features, image_features_source = self.encode_images(concat_images, long_video=long_video)
+            else:
+                image_features, _ = self.encode_images(concat_images, long_video=long_video)
         else:
-            image_features = self.encode_images(images, long_video=long_video)
+            if self.config.mm_token_source:
+                image_features, image_features_source = self.encode_images(images, long_video=long_video)
+            else:
+                image_features, _ = self.encode_images(images, long_video=long_video)
 
 
         new_input_embeds = []
@@ -245,9 +260,9 @@ class LLaMAVIDMetaForCausalLM(ABC):
                     text_size = cur_new_input_embeds[-1].size(0)
                     top_k = max(0, self.config.max_position_embeddings - (system_size + text_size))
                     if top_k < video_size:
-                        if False: #TODO:  plotting should not be hard coded
-                            plot_source_top_k_tokens(cur_new_input_embeds[-2], cur_new_input_embeds[-1], images[0])
-                        if cur_new_labels is not None:
+                        if self.config.mm_token_source: #TODO:  plotting should not be hard coded
+                            plot_source_top_k_tokens(cur_new_input_embeds[-2], cur_new_input_embeds[-1], images[0], image_features_source)
+                        if labels is not None:
                             cur_new_input_embeds[-2], cur_new_labels[-2] = self.get_token_pruning()(cur_new_input_embeds[-2],
                                                                             cur_new_input_embeds[-1], top_k, cur_new_labels[-2])
                         else:
