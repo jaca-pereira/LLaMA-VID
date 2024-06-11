@@ -25,7 +25,7 @@ def prune_top_k_tokens(video_tokens: torch.Tensor, text_tokens: torch.Tensor, k:
     _, top_k_idx = torch.topk(sim, k, dim=-1)  # shape becomes [batch_size, k]
 
     # Gather the top k tokens from the original video tokens
-    top_k_tokens = video_tokens.squeeze(0)[top_k_idx]
+    top_k_tokens = video_tokens[top_k_idx]
     if labels is not None:
         top_k_labels = labels[top_k_idx] #TODO change to labels.squeeze(0) if labels is not None and labels.dim() > 2
     else:

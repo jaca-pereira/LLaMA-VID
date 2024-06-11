@@ -98,7 +98,7 @@ class LLaMAVIDMetaModel:
         self.config.mm_token_merging = getattr(self.config, 'mm_token_merging',
                                                True)  # TODO change to false once config is set
         self.config.mm_token_source = getattr(self.config, 'mm_token_source',
-                                              False)  # TODO change to false once config is set
+                                              True)  # TODO change to false once config is set
         if self.config.mm_token_merging:
             self.config.mm_token_merging_st_dist = getattr(self.config, 'mm_token_merging_st_dist', True)
             self.config.mm_token_merging_merge = getattr(self.config, 'mm_token_merging_merge', True)
@@ -145,7 +145,9 @@ class LLaMAVIDMetaForCausalLM(ABC):
 
         # token merging
         if self.config.mm_token_merging:
-            if images.shape[0] < 96: # first third of the 5 minutes
+            if images.shape[0] == 1: #TODO: WHAT IF THERE IS BATCH SIZE? print shape when training and exit
+                kth = 1 #equivalent to doing nothing
+            elif images.shape[0] < 96: # first third of the 5 minutes
                 kth = 2
             elif images.shape[0] < 200: # second third of the 5 minutes
                 kth = 4
@@ -166,6 +168,10 @@ class LLaMAVIDMetaForCausalLM(ABC):
 
             if self.config.mm_token_source:
                 image_features_source = self.get_token_merging_source()(merge, image_features_copy)
+            else:
+                image_features_source = None
+        else:
+            image_features_source = None
 
         image_features = self.get_model().mm_projector(image_features)
         image_features = torch.squeeze(image_features, dim=0)
@@ -304,8 +310,8 @@ class LLaMAVIDMetaForCausalLM(ABC):
                             plot_source_top_k_tokens(cur_new_input_embeds[-2], cur_new_input_embeds[-1], images[0],
                                                      image_features_source)
                         text_model, tokenizer, token_pruning = self.get_token_pruning()
-                        text_inputs = tokenizer(cur_input_ids[-1], return_tensors="pt")
-                        text_embeds = text_model.get_text_features(**text_inputs).last_hidden_state
+                        text_inputs = tokenizer(self.prompts[batch_idx], return_tensors="pt").to(device=self.device)
+                        text_embeds = text_model(**text_inputs).last_hidden_state[0]
                         if labels is not None:
                             cur_new_input_embeds[-2], cur_new_labels[-2] = token_pruning(
                                 cur_new_input_embeds[-2],
@@ -318,13 +324,6 @@ class LLaMAVIDMetaForCausalLM(ABC):
                 if labels is not None:
                     cur_new_labels = torch.cat(cur_new_labels, dim=0)
                     new_labels.append(cur_new_labels)
-
-                cur_new_input_embeds = torch.cat(cur_new_input_embeds, dim=0)
-                new_input_embeds.append(cur_new_input_embeds)
-                if labels is not None:
-                    cur_new_labels = torch.cat(cur_new_labels, dim=0)
-                    new_labels.append(cur_new_labels)
-
             else:
                 cur_new_input_embeds = torch.Tensor(len(cur_input_ids), self.config.hidden_size).to(dtype=self.dtype, device=self.device)
                 text_token_indices = torch.where(cur_input_ids != IMAGE_TOKEN_INDEX)[0]
