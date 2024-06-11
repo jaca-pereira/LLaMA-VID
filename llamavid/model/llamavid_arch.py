@@ -19,6 +19,7 @@
 from abc import ABC, abstractmethod
 
 import torch
+from transformers import CLIPTextModel, CLIPTokenizer
 
 from .multimodal_encoder.builder import build_vision_tower
 from .multimodal_projector.builder import build_vision_projector
@@ -26,6 +27,7 @@ from .multimodal_projector.builder import build_vision_projector
 from llamavid.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 from .to_me.token_merging import kth_bipartite_soft_matching, merge_wavg, merge_source
 from .to_me.token_pruning import prune_top_k_tokens, plot_source_top_k_tokens
+
 
 
 class LLaMAVIDMetaModel:
@@ -36,6 +38,8 @@ class LLaMAVIDMetaModel:
         if hasattr(config, "mm_vision_tower"):
             self.vision_tower = build_vision_tower(config, delay_load=True)
             self.mm_projector = build_vision_projector(config)
+
+
 
     def get_vision_tower(self):
         vision_tower = getattr(self, 'vision_tower', None)
@@ -81,16 +85,28 @@ class LLaMAVIDMetaModel:
             self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'mm_projector'))
 
     def initialize_token_reduction(self):
-        self.config.mm_token_pruning = getattr(self.config, 'mm_token_pruning', True) #TODO change to false once config is set
-        if self.config.mm_token_pruning:
-            self.token_pruning = prune_top_k_tokens if self.config.mm_token_pruning else None
+        self.config.mm_token_pruning = getattr(self.config, 'mm_token_pruning',
+                                               True)  # TODO change to false once config is set
+        if self.config.mm_token_pruning :
+            self.text_model = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14")
+            self.text_model.eval()
+            self.text_model.requires_grad_(False)
+            self.text_model.to(self.vision_tower.device)
+            self.token_pruning = prune_top_k_tokens
+            self.text_tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
 
-        self.config.mm_token_merging = getattr(self.config, 'mm_token_merging', True) #TODO change to false once config is set
-        self.config.mm_token_source = getattr(self.config, 'mm_token_source', True) #TODO change to false once config is set
+        self.config.mm_token_merging = getattr(self.config, 'mm_token_merging',
+                                               True)  # TODO change to false once config is set
+        self.config.mm_token_source = getattr(self.config, 'mm_token_source',
+                                              False)  # TODO change to false once config is set
         if self.config.mm_token_merging:
             self.config.mm_token_merging_kth = getattr(self.config, 'mm_token_merging_kth', 2)
-            self.token_merge = kth_bipartite_soft_matching if self.config.mm_token_merging else None
-            self.token_merge_wavg = merge_wavg if self.config.mm_token_merging else None
+            self.config.mm_token_merging_st_dist = getattr(self.config, 'mm_token_merging_st_dist', True)
+            self.config.mm_token_merging_merge = getattr(self.config, 'mm_token_merging_merge', True)
+            self.config.mm_lambda_t = getattr(self.config, 'mm_lambda_t', 0.25)
+            self.config.mm_lambda_s = getattr(self.config, 'mm_lambda_s', 0.25)
+            self.token_merge = kth_bipartite_soft_matching
+            self.token_merge_wavg = merge_wavg
             self.token_merge_source = merge_source if self.config.mm_token_source else None
 
 class LLaMAVIDMetaForCausalLM(ABC):
@@ -109,11 +125,11 @@ class LLaMAVIDMetaForCausalLM(ABC):
     def get_token_merging_source(self):
         return self.get_model().token_merge_source
     def get_token_pruning(self):
-        return self.get_model().token_pruning
+        return self.get_model().text_model, self.get_model().text_tokenizer, self.get_model().token_pruning
 
     #changed function definition
     #def encode_images(self, images, prompts=None, image_counts=None, long_video=False):
-    def encode_images(self, images, long_video=False):
+    def encode_images(self, images, long_video=False, prompts=None, labels=None):
         if long_video:
             # use pre-computed features
             image_features = images
@@ -128,21 +144,37 @@ class LLaMAVIDMetaForCausalLM(ABC):
             image_features = image_features.unsqueeze(0)
         image_features = image_features.reshape(image_features.shape[0], image_features.shape[1]*image_features.shape[2], image_features.shape[3])
 
-        #token merging
+        # token merging
         if self.config.mm_token_merging:
-            merge, _ = self.get_token_merging()(image_features, self.config.mm_token_merging_kth)
-            image_features_copy = image_features.clone()
-            image_features, _ = self.get_token_merging_wavg()(merge, image_features, None)
+            merge, _ = self.get_token_merging()(image_features, self.config.mm_token_merging_kth,
+                                                self.config.mm_token_merging_merge,
+                                                self.config.mm_token_merging_st_dist,
+                                                self.config.mm_lambda_t, self.config.mm_lambda_s)
+            if self.config.mm_token_source:
+                image_features_copy = image_features.clone()
+
+            if self.config.mm_token_merging_merge:
+                image_features, _ = self.get_token_merging_wavg()(merge, image_features, None)
+            else:
+                image_features = merge(image_features)
+
             if self.config.mm_token_source:
                 image_features_source = self.get_token_merging_source()(merge, image_features_copy, None)
+        if self.config.mm_token_pruning:
+            prompts = self.get_model().text_tokenizer(prompts[0], return_tensors='pt')['input_ids'].to(device=self.device)
+            prompts = self.get_model().text_model(prompts)[0]
+            if self.config.mm_token_source:  # TODO:  plotting should not be hard coded
+                plot_source_top_k_tokens(image_features, prompts, images, image_features_source, k=100)
+            k = 1000 #TODO: change to dynamic value
+            if labels is not None:
+                image_features, labels = self.get_model().token_pruning(image_features, k, labels)
             else:
-                image_features_source = None
-        else:
-            image_features_source = None
+                image_features, _ = self.get_model().token_pruning(image_features, prompts, k)
+
         image_features = self.get_model().mm_projector(image_features)
         image_features = torch.squeeze(image_features, dim=0)
         image_features_list = [image_features]
-        return image_features_list, image_features_source
+        return image_features_list, labels
 
     def update_prompt(self, prompts=None):
         self.prompts = prompts
@@ -167,16 +199,15 @@ class LLaMAVIDMetaForCausalLM(ABC):
             if not long_video:
                 images = [image if len(image.shape) == 4 else image.unsqueeze(0) for image in images]
             concat_images = torch.cat(images, dim=0)
-            if self.config.mm_token_source:
-                image_features, image_features_source = self.encode_images(concat_images, long_video=long_video)
+            if labels is not None:
+                image_features, labels = self.encode_images(concat_images, long_video=long_video, prompts=prompts, labels=labels)
             else:
-                image_features, _ = self.encode_images(concat_images, long_video=long_video)
+                image_features, _ = self.encode_images(concat_images, long_video=long_video, prompts=prompts)
         else:
-            if self.config.mm_token_source:
-                image_features, image_features_source = self.encode_images(images, long_video=long_video)
+            if labels is not None:
+                image_features, labels = self.encode_images(images, long_video=long_video, prompts=prompts, labels=labels)
             else:
-                image_features, _ = self.encode_images(images, long_video=long_video)
-
+                image_features, _ = self.encode_images(images, long_video=long_video, prompts=prompts)
 
         new_input_embeds = []
         new_labels = [] if labels is not None else None
@@ -253,20 +284,6 @@ class LLaMAVIDMetaForCausalLM(ABC):
                     if labels is not None:
                         cur_new_labels.append(cur_labels)
                 cur_new_input_embeds = [x.to(device=self.device) for x in cur_new_input_embeds]
-                # ADDED TOKEN PRUNING
-                if self.config.mm_token_pruning:
-                    system_size = cur_new_input_embeds[0].size(0)
-                    video_size = cur_new_input_embeds[-2].size(0)
-                    text_size = cur_new_input_embeds[-1].size(0)
-                    top_k = max(0, self.config.max_position_embeddings - (system_size + text_size))
-                    if top_k < video_size:
-                        if self.config.mm_token_source: #TODO:  plotting should not be hard coded
-                            plot_source_top_k_tokens(cur_new_input_embeds[-2], cur_new_input_embeds[-1], images[0], image_features_source)
-                        if labels is not None:
-                            cur_new_input_embeds[-2], cur_new_labels[-2] = self.get_token_pruning()(cur_new_input_embeds[-2],
-                                                                            cur_new_input_embeds[-1], top_k, cur_new_labels[-2])
-                        else:
-                            cur_new_input_embeds[-2], _ = self.get_token_pruning()(cur_new_input_embeds[-2], cur_new_input_embeds[-1], top_k)
                 cur_new_input_embeds = torch.cat(cur_new_input_embeds, dim=0)
                 new_input_embeds.append(cur_new_input_embeds)
                 if labels is not None:

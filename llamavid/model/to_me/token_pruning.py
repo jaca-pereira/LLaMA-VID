@@ -12,28 +12,29 @@ def prune_top_k_tokens(video_tokens: torch.Tensor, text_tokens: torch.Tensor, k:
     # Normalize the tokens and store in new variables
     normalized_video_tokens = video_tokens / video_tokens.norm(p=2, dim=-1, keepdim=True)
     normalized_text_tokens = text_tokens / text_tokens.norm(p=2, dim=-1, keepdim=True)
-
+    normalized_text_tokens = torch.nn.functional.pad(normalized_text_tokens, (0, normalized_video_tokens.shape[-1] - normalized_text_tokens.shape[-1]))
+    normalized_text_tokens = normalized_text_tokens.half()
     # Calculate cosine similarity
     sim = normalized_video_tokens @ normalized_text_tokens.transpose(-1,
                                                                      -2)  # shape becomes [batch_size, num_video_tokens, num_text_tokens]
 
     # Calculate the sum cosine similarity
-    sum_sim = torch.sum(sim, dim=-1)  # shape becomes [batch_size, num_video_tokens]
+    sim = torch.sum(sim, dim=-1)  # shape becomes [batch_size, num_video_tokens]
 
     # Get the indices of the top_k video tokens
-    _, top_k_idx = torch.topk(sum_sim, k, dim=-1)  # shape becomes [batch_size, k]
+    _, top_k_idx = torch.topk(sim, k, dim=-1)  # shape becomes [batch_size, k]
 
     # Gather the top k tokens from the original video tokens
-    top_k_tokens = video_tokens[top_k_idx]
+    top_k_tokens = video_tokens.squeeze(0)[top_k_idx]
     if labels is not None:
-        top_k_labels = labels[top_k_idx]
+        top_k_labels = labels[top_k_idx] #TODO change to labels.squeeze(0) if labels is not None and labels.dim() > 2
     else:
         top_k_labels = None
     return top_k_tokens, top_k_labels
 
 
 def plot_source_top_k_tokens(video_tokens: torch.Tensor, text_tokens: torch.Tensor, video: torch.Tensor,
-                             source: torch.Tensor, k: int = 20):
+                             source: torch.Tensor, k: int = 100):
     """
     Returns the top_k video tokens that have the highest average cosine similarity with the text tokens.
     """
@@ -41,17 +42,21 @@ def plot_source_top_k_tokens(video_tokens: torch.Tensor, text_tokens: torch.Tens
     normalized_video_tokens = video_tokens / video_tokens.norm(p=2, dim=-1, keepdim=True)
     normalized_text_tokens = text_tokens / text_tokens.norm(p=2, dim=-1, keepdim=True)
 
+    normalized_text_tokens = torch.nn.functional.pad(normalized_text_tokens, (0, normalized_video_tokens.shape[-1] - normalized_text_tokens.shape[-1]))
+    normalized_text_tokens = normalized_text_tokens.half()
+
     # Calculate cosine similarity
     sim = normalized_video_tokens @ normalized_text_tokens.transpose(-1,
                                                                      -2)  # shape becomes [batch_size, num_video_tokens, num_text_tokens]
 
     # Calculate the sum cosine similarity
-    sum_sim = torch.sum(sim, dim=-1)  # shape becomes [batch_size, num_video_tokens]
+    sim = torch.sum(sim, dim=-1)  # shape becomes [batch_size, num_video_tokens]
 
     # Get the indices of the top_k video tokens
-    _, top_k_idx = torch.topk(sum_sim, k, dim=-1)  # shape becomes [batch_size, k]
-    # get original source tokens for top_k_idx
+    _, top_k_idx = torch.topk(sim, k, dim=-1)  # shape becomes [batch_size, k]
     source = source.squeeze(0)
+    top_k_idx = top_k_idx.squeeze(0)
+    # get original source tokens for top_k_idx
     source_topk_idx = source[top_k_idx]
     for i in range(k):
         map_idx = source_topk_idx[i]
@@ -71,18 +76,20 @@ def plot_source_top_k_tokens(video_tokens: torch.Tensor, text_tokens: torch.Tens
     col_indices = patch_indices % 16
 
     # plot the patches from video with the same indexes as top_k_idx tokens from video_tokens
-    fig, axs = plt.subplots(1, k, figsize=(20, 5))
+    fig, axs = plt.subplots(4,25, figsize=(20, 10))
     for i in range(k):
         frame_index = frame_indices[i].item()
         row_index = row_indices[i].item() * 14
         col_index = col_indices[i].item() * 14
-        patch = video[frame_index, :, row_index:row_index + 14,
-                col_index:col_index + 14]  # assuming video is a [num_frames, channels, height, width] tensor
-        patch = F.interpolate(patch.unsqueeze(0), size=(112, 112), mode='bilinear', align_corners=False)
+        patch = video[frame_index, :, max((row_index-14), 0):min((row_index + 14), 224),
+                max((col_index-14), 0):min((col_index+14), 224)]  # assuming video is a [num_frames, channels, height, width] tensor
+        #patch = F.interpolate(patch.unsqueeze(0), size=(112, 112), mode='bilinear', align_corners=False)
         patch = patch.squeeze(0)
         patch = patch.permute(1, 2, 0).to('cpu').numpy().astype(float)
-        axs[i].imshow(patch)
-        axs[i].axis('off')
+        axs_x = i // 25
+        axs_y = i % 25
+        axs[axs_x][axs_y].imshow(patch)
+        axs[axs_x][axs_y].axis('off')
     plt.show()
     plt.close()
     exit(1)
