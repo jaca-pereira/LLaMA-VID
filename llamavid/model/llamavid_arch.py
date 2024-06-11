@@ -154,27 +154,17 @@ class LLaMAVIDMetaForCausalLM(ABC):
                 image_features_copy = image_features.clone()
 
             if self.config.mm_token_merging_merge:
-                image_features, _ = self.get_token_merging_wavg()(merge, image_features, None)
+                image_features, _ = self.get_token_merging_wavg()(merge, image_features)
             else:
                 image_features = merge(image_features)
 
             if self.config.mm_token_source:
-                image_features_source = self.get_token_merging_source()(merge, image_features_copy, None)
-        if self.config.mm_token_pruning:
-            prompts = self.get_model().text_tokenizer(prompts[0], return_tensors='pt')['input_ids'].to(device=self.device)
-            prompts = self.get_model().text_model(prompts)[0]
-            if self.config.mm_token_source:  # TODO:  plotting should not be hard coded
-                plot_source_top_k_tokens(image_features, prompts, images, image_features_source, k=100)
-            k = 1000 #TODO: change to dynamic value
-            if labels is not None:
-                image_features, labels = self.get_model().token_pruning(image_features, k, labels)
-            else:
-                image_features, _ = self.get_model().token_pruning(image_features, prompts, k)
+                image_features_source = self.get_token_merging_source()(merge, image_features_copy)
 
         image_features = self.get_model().mm_projector(image_features)
         image_features = torch.squeeze(image_features, dim=0)
         image_features_list = [image_features]
-        return image_features_list, labels
+        return image_features_list, labels, image_features_source
 
     def update_prompt(self, prompts=None):
         self.prompts = prompts
@@ -200,14 +190,26 @@ class LLaMAVIDMetaForCausalLM(ABC):
                 images = [image if len(image.shape) == 4 else image.unsqueeze(0) for image in images]
             concat_images = torch.cat(images, dim=0)
             if labels is not None:
-                image_features, labels = self.encode_images(concat_images, long_video=long_video, prompts=prompts, labels=labels)
+                if self.config.mm_token_source:
+                    image_features, labels, image_features_source = self.encode_images(concat_images, long_video=long_video, prompts=prompts, labels=labels)
+                else:
+                    image_features, labels, _ = self.encode_images(concat_images, long_video=long_video, prompts=prompts, labels=labels)
             else:
-                image_features, _ = self.encode_images(concat_images, long_video=long_video, prompts=prompts)
+                if self.config.mm_token_source:
+                    image_features, _, image_features_source= self.encode_images(concat_images, long_video=long_video, prompts=prompts)
+                else:
+                    image_features, _, _ = self.encode_images(concat_images, long_video=long_video, prompts=prompts)
         else:
             if labels is not None:
-                image_features, labels = self.encode_images(images, long_video=long_video, prompts=prompts, labels=labels)
+                if self.config.mm_token_source:
+                    image_features, labels, image_features_source = self.encode_images(images, long_video=long_video, prompts=prompts, labels=labels)
+                else:
+                    image_features, labels, _ = self.encode_images(images, long_video=long_video, prompts=prompts, labels=labels)
             else:
-                image_features, _ = self.encode_images(images, long_video=long_video, prompts=prompts)
+                if self.config.mm_token_source:
+                    image_features, _, image_features_source = self.encode_images(images, long_video=long_video, prompts=prompts)
+                else:
+                    image_features, _, _ = self.encode_images(images, long_video=long_video, prompts=prompts)
 
         new_input_embeds = []
         new_labels = [] if labels is not None else None
@@ -284,6 +286,33 @@ class LLaMAVIDMetaForCausalLM(ABC):
                     if labels is not None:
                         cur_new_labels.append(cur_labels)
                 cur_new_input_embeds = [x.to(device=self.device) for x in cur_new_input_embeds]
+
+                """Added token prunign here so that we can get the system_size and the text_size to calculate the top_k tokens for the video tokens."""
+                if self.config.mm_token_pruning:
+                    system_size = cur_new_input_embeds[0].size(0)
+                    video_size = cur_new_input_embeds[-2].size(0)
+                    text_size = cur_new_input_embeds[-1].size(0)
+                    top_k = max(0, self.config.max_position_embeddings - (system_size + text_size))
+                    if top_k < video_size:
+                        if self.config.mm_token_source:  # TODO:  plotting should not be hard coded
+                            plot_source_top_k_tokens(cur_new_input_embeds[-2], cur_new_input_embeds[-1], images[0],
+                                                     image_features_source)
+                        text_model, tokenizer, token_pruning = self.get_token_pruning()
+                        text_inputs = tokenizer(cur_input_ids[-1], return_tensors="pt")
+                        text_embeds = text_model.get_text_features(**text_inputs).last_hidden_state
+                        if labels is not None:
+                            cur_new_input_embeds[-2], cur_new_labels[-2] = token_pruning(
+                                cur_new_input_embeds[-2],
+                                text_embeds, top_k, cur_new_labels[-2])
+                        else:
+                            cur_new_input_embeds[-2], _ = token_pruning(cur_new_input_embeds[-2],
+                                                                                   text_embeds, top_k)
+                cur_new_input_embeds = torch.cat(cur_new_input_embeds, dim=0)
+                new_input_embeds.append(cur_new_input_embeds)
+                if labels is not None:
+                    cur_new_labels = torch.cat(cur_new_labels, dim=0)
+                    new_labels.append(cur_new_labels)
+
                 cur_new_input_embeds = torch.cat(cur_new_input_embeds, dim=0)
                 new_input_embeds.append(cur_new_input_embeds)
                 if labels is not None:
