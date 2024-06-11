@@ -15,7 +15,7 @@
 # Modified from LLaVA (https://github.com/haotian-liu/LLaVA)
 # Copyright 2023 Yanwei Li
 # ------------------------------------------------------------------------
-
+import random
 from abc import ABC, abstractmethod
 
 import torch
@@ -100,7 +100,6 @@ class LLaMAVIDMetaModel:
         self.config.mm_token_source = getattr(self.config, 'mm_token_source',
                                               False)  # TODO change to false once config is set
         if self.config.mm_token_merging:
-            self.config.mm_token_merging_kth = getattr(self.config, 'mm_token_merging_kth', 2)
             self.config.mm_token_merging_st_dist = getattr(self.config, 'mm_token_merging_st_dist', True)
             self.config.mm_token_merging_merge = getattr(self.config, 'mm_token_merging_merge', True)
             self.config.mm_lambda_t = getattr(self.config, 'mm_lambda_t', 0.25)
@@ -146,7 +145,14 @@ class LLaMAVIDMetaForCausalLM(ABC):
 
         # token merging
         if self.config.mm_token_merging:
-            merge, _ = self.get_token_merging()(image_features, self.config.mm_token_merging_kth,
+            if images.shape[0] < 96: # first third of the 5 minutes
+                kth = 2
+            elif images.shape[0] < 200: # second third of the 5 minutes
+                kth = 4
+            else:
+                kth = 8 #kth is not dynamically chosen since all training videos are up to 5 minutes
+
+            merge, _ = self.get_token_merging()(image_features, kth,
                                                 self.config.mm_token_merging_merge,
                                                 self.config.mm_token_merging_st_dist,
                                                 self.config.mm_lambda_t, self.config.mm_lambda_s)
