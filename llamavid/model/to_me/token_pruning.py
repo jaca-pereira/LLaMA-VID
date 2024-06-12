@@ -8,7 +8,10 @@ def prune_top_k_tokens(video_tokens: torch.Tensor, text_tokens: torch.Tensor, k:
     """
     Returns the top_k video tokens that have the highest average cosine similarity with the text tokens.
     """
-
+    sqz = False
+    if video_tokens.dim() == 2:
+        video_tokens = video_tokens.unsqueeze(0)
+        sqz = True
     # Normalize the tokens and store in new variables
     normalized_video_tokens = video_tokens / video_tokens.norm(p=2, dim=-1, keepdim=True)
     normalized_text_tokens = text_tokens / text_tokens.norm(p=2, dim=-1, keepdim=True)
@@ -24,12 +27,23 @@ def prune_top_k_tokens(video_tokens: torch.Tensor, text_tokens: torch.Tensor, k:
     # Get the indices of the top_k video tokens
     _, top_k_idx = torch.topk(sim, k, dim=-1)  # shape becomes [batch_size, k]
 
-    # Gather the top k tokens from the original video tokens
-    top_k_tokens = video_tokens[top_k_idx]
-    if labels is not None:
-        top_k_labels = labels[top_k_idx] #TODO change to labels.squeeze(0) if labels is not None and labels.dim() > 2
-    else:
-        top_k_labels = None
+    top_k_tokens = None
+    top_k_labels = None
+
+    for n in range(video_tokens.shape[0]):
+        if top_k_tokens is None:
+            top_k_tokens = video_tokens[n][top_k_idx[n]]
+            top_k_tokens = top_k_tokens.unsqueeze(0)
+            if labels is not None:
+                top_k_labels = labels[top_k_idx[n]].unsqueeze(0)
+        else:
+            top_k_tokens = torch.cat((top_k_tokens, video_tokens[n][top_k_idx[n]].unsqueeze(0)), dim=0)
+            if labels is not None:
+                top_k_labels = torch.cat((top_k_labels, labels[top_k_idx[n]].unsqueeze(0)), dim=0)
+    if sqz:
+        top_k_tokens = top_k_tokens.squeeze(0)
+        if labels is not None:
+            top_k_labels = top_k_labels.squeeze(0)
     return top_k_tokens, top_k_labels
 
 
@@ -38,6 +52,8 @@ def plot_source_top_k_tokens(video_tokens: torch.Tensor, text_tokens: torch.Tens
     """
     Returns the top_k video tokens that have the highest average cosine similarity with the text tokens.
     """
+    if text_tokens.dim() == 3:
+        text_tokens = text_tokens.squeeze(0)
     # Normalize the tokens and store in new variables
     normalized_video_tokens = video_tokens / video_tokens.norm(p=2, dim=-1, keepdim=True)
     normalized_text_tokens = text_tokens / text_tokens.norm(p=2, dim=-1, keepdim=True)
@@ -54,8 +70,6 @@ def plot_source_top_k_tokens(video_tokens: torch.Tensor, text_tokens: torch.Tens
 
     # Get the indices of the top_k video tokens
     _, top_k_idx = torch.topk(sim, k, dim=-1)  # shape becomes [batch_size, k]
-    source = source.squeeze(0)
-    top_k_idx = top_k_idx.squeeze(0)
     # get original source tokens for top_k_idx
     source_topk_idx = source[top_k_idx]
     for i in range(k):

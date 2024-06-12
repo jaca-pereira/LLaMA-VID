@@ -18,6 +18,7 @@
 import random
 from abc import ABC, abstractmethod
 
+import numpy as np
 import torch
 from transformers import CLIPTextModel, CLIPTokenizer
 
@@ -98,7 +99,7 @@ class LLaMAVIDMetaModel:
         self.config.mm_token_merging = getattr(self.config, 'mm_token_merging',
                                                True)  # TODO change to false once config is set
         self.config.mm_token_source = getattr(self.config, 'mm_token_source',
-                                              True)  # TODO change to false once config is set
+                                              False)  # TODO change to false once config is set
         if self.config.mm_token_merging:
             self.config.mm_token_merging_st_dist = getattr(self.config, 'mm_token_merging_st_dist', True)
             self.config.mm_token_merging_merge = getattr(self.config, 'mm_token_merging_merge', True)
@@ -128,7 +129,12 @@ class LLaMAVIDMetaForCausalLM(ABC):
 
     #changed function definition
     #def encode_images(self, images, prompts=None, image_counts=None, long_video=False):
-    def encode_images(self, images, long_video=False, prompts=None, labels=None, top_k=1000):
+    def encode_images(self, images, long_video=False, prompts=None, labels=None, top_k=None):
+        n_dim = len(images.shape)
+        if n_dim == 4:
+            i = -1
+        else:
+            i = 0
         if long_video:
             # use pre-computed features
             image_features = images
@@ -136,20 +142,21 @@ class LLaMAVIDMetaForCausalLM(ABC):
             image_features = self.get_model().get_vision_tower()(images)
         # remove cls embedding
         if self.config.mm_vision_select_feature == 'patch':
-            if image_features.shape[1] % 2 == 1:
-                image_features = image_features[:, 1:]
-        ndim = image_features.ndim
-        if ndim == 3:
-            image_features = image_features.unsqueeze(0)
-        image_features = image_features.reshape(image_features.shape[0], image_features.shape[1]*image_features.shape[2], image_features.shape[3])
+            if image_features.shape[i+2] % 2 == 1:
+                image_features = image_features[..., 1:, :]
+
+        if n_dim == 4:
+            image_features = image_features.reshape(image_features.shape[-3]*image_features.shape[-2], image_features.shape[-1])
+        else:
+            image_features = image_features.reshape(image_features.shape[0], image_features.shape[-3]*image_features.shape[-2], image_features.shape[-1])
 
         # token merging
         if self.config.mm_token_merging:
-            if images.shape[0] == 1: #TODO: WHAT IF THERE IS BATCH SIZE? print shape when training and exit
+            if images.shape[i+1] == 1:
                 kth = 1 #equivalent to doing nothing
-            elif images.shape[0] < 96: # first third of the 5 minutes
+            elif images.shape[i+1] < 96: # first third of the 5 minutes
                 kth = 2
-            elif images.shape[0] < 200: # second third of the 5 minutes
+            elif images.shape[i+1] < 200: # second third of the 5 minutes
                 kth = 4
             else:
                 kth = 8 #kth is not dynamically chosen since all training videos are up to 5 minutes
@@ -171,23 +178,47 @@ class LLaMAVIDMetaForCausalLM(ABC):
 
 
         if self.config.mm_token_pruning:
+            text_model, tokenizer, token_pruning = self.get_token_pruning()
 
 
-            if top_k < image_features.shape[0]:
+            for p in range(len(prompts)):
+                text_embeds = None
+                sqz = False
+                if image_features.dim() == 2:
+                    image_features = image_features.unsqueeze(0)
+                    sqz = True
+                image_features_copy = None
+                labels_copy = None
+                if top_k[p] < image_features[p].shape[0]:
+                    text_inputs = tokenizer(prompts[p], return_tensors="pt").to(device=self.device)
+                    if text_embeds is None:
+                        text_embeds = text_model(**text_inputs).last_hidden_state
+                    else:
+                        text_embeds = torch.cat((text_embeds, text_model(**text_inputs).last_hidden_state), dim=0)
+                    if self.config.mm_token_source:  # TODO:  plotting should not be hard coded
+                        plot_source_top_k_tokens(image_features[p], text_embeds, images, image_features_source)
 
-                text_model, tokenizer, token_pruning = self.get_token_pruning()
-                text_inputs = tokenizer(prompts, return_tensors="pt").to(device=self.device)
-                text_embeds = text_model(**text_inputs).last_hidden_state[0]
-
-                if self.config.mm_token_source:  # TODO:  plotting should not be hard coded
-                    plot_source_top_k_tokens(image_features, text_embeds, images[0], image_features_source)
-
-                if labels is not None:
-                    image_features, labels = token_pruning(
-                        image_features,
-                        text_embeds, top_k, labels)
-                else:
-                    image_features, _ = token_pruning(image_features, text_embeds, top_k)
+                    if labels is not None:
+                        image_features_p, labels_p = token_pruning(
+                            image_features[p],
+                            text_embeds, top_k[p], labels[p])
+                        if image_features_copy is None:
+                            image_features_copy = image_features_p
+                            image_features_copy = image_features_copy.unzqueeze(0)
+                            labels_copy = labels_p
+                            labels_copy = labels_copy.unsqueeze(0)
+                        else:
+                            image_features[p] = image_features_p
+                            labels[p] = labels_p
+                    else:
+                        if image_features_copy is None:
+                            image_features_copy = image_features[p]
+                            image_features_copy = image_features_copy.unsqueeze(0)
+                        else:
+                            image_features_p, _ = token_pruning(image_features[p], text_embeds, top_k[p].item())
+                            image_features_copy[p] = image_features_p
+                if sqz:
+                    image_features_copy = image_features_copy.squeeze(0)
 
         image_features = self.get_model().mm_projector(image_features)
         image_features = torch.squeeze(image_features, dim=0)
@@ -211,26 +242,27 @@ class LLaMAVIDMetaForCausalLM(ABC):
             long_video = True
         else:
             long_video = False
-        system_size = 0
-        if past_key_values is not None:
-            system_size = past_key_values[-1][-1].shape[-2]
-        text_size = input_ids.shape[1]
-        top_k = max(0, self.config.max_position_embeddings - (system_size + text_size))
+        max_len = self.config.max_length
+        non_image_token_number = (input_ids != IMAGE_TOKEN_INDEX).sum(dim=1)
+        if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
+            top_k = max_len - non_image_token_number
+        else:
+            top_k = max_len - non_image_token_number - 1
         if type(images) is list or images.ndim == 5:
             # not reseshape for long video
             if not long_video:
                 images = [image if len(image.shape) == 4 else image.unsqueeze(0) for image in images]
             concat_images = torch.cat(images, dim=0)
             if labels is not None:
-                image_features, labels = self.encode_images(concat_images, long_video=long_video, prompts=prompts, labels=labels)
+                image_features, labels = self.encode_images(concat_images, long_video=long_video, prompts=prompts, labels=labels, top_k=top_k)
             else:
-                image_features, _ = self.encode_images(concat_images, long_video=long_video, prompts=prompts)
+                image_features, _ = self.encode_images(concat_images, long_video=long_video, prompts=prompts, top_k=top_k)
         else:
             if labels is not None:
                 image_features, labels = self.encode_images(images, long_video=long_video, prompts=prompts,
-                                                            labels=labels)
+                                                            labels=labels, top_k=top_k)
             else:
-                image_features, _ = self.encode_images(images, long_video=long_video, prompts=prompts)
+                image_features, _ = self.encode_images(images, long_video=long_video, prompts=prompts, top_k=top_k)
 
         new_input_embeds = []
         new_labels = [] if labels is not None else None

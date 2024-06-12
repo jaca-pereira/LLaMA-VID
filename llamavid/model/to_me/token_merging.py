@@ -138,6 +138,8 @@ def kth_bipartite_soft_matching(
 
     with torch.no_grad():
         metric = metric / metric.norm(dim=-1, keepdim=True)
+        if len(metric.shape) == 2:
+            metric = metric.unsqueeze(0)
         a, b = split(metric)
         r = a.shape[1]
         scores = a @ b.transpose(-1, -2)
@@ -150,19 +152,21 @@ def kth_bipartite_soft_matching(
 
             temporal_distance = torch.abs(idx_a[:, None] // 256 - idx_b[None, :] // 256) / num_frames
             spatial_distance = torch.abs(idx_a[:, None] % 16 - idx_b[None, :] % 16) / 16
-            if lambda_t + lambda_s != 1:
-                lambda_t = 0.25
-                lambda_s = 0.25
             scores = scores - lambda_t * temporal_distance - lambda_s * spatial_distance
 
         _, dst_idx = scores.max(dim=-1)
         dst_idx = dst_idx[..., None]
 
     def merge(x: torch.Tensor, mode="mean") -> torch.Tensor:
+        sqz = False
+        if len(x.shape) == 2:
+            sqz = True
+            x = x.unsqueeze(0)
         src, dst = split(x)
         n, _, c = src.shape
         dst = dst.scatter_reduce(-2, dst_idx.expand(n, r, c), src, reduce=mode)
-
+        if sqz:
+            dst = dst.squeeze(0)
         return dst
 
     def unmerge(x: torch.Tensor) -> torch.Tensor:
@@ -273,9 +277,15 @@ def merge_source(
     For source tracking. Source is an adjacency matrix between the initial tokens and final merged groups.
     x is used to find out how many tokens there are in case the source is None.
     """
+    sqz = False
     if source is None:
+        if len(x.shape) == 2:
+            x = x.unsqueeze(0)
+            sqz = True
         n, t, _ = x.shape
         source = torch.eye(t, device=x.device)[None, ...].expand(n, t, t)
 
     source = merge(source, mode="sum")
+    if sqz:
+        source = source.squeeze(0)
     return source
