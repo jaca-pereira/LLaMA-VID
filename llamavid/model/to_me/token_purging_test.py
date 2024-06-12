@@ -14,7 +14,7 @@ class TestTokenPurging(unittest.TestCase):
 
         t0 = time.time()
         # Call the function with the mock data
-        result = token_purging.prune_top_k_tokens(video_tokens, text_tokens, k)
+        result = token_purging.text_topk_pruning(video_tokens, text_tokens, k)
         t1 = time.time()
         print("Time taken: ", t1-t0)
 

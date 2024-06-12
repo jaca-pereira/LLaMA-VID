@@ -1199,7 +1199,7 @@ def train():
         model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
 
         # initialize token merging HERE
-        model.get_model().initialize_token_reduction()
+        model.get_model().initialize_token_selection()
 
 
     if training_args.bits in [4, 8]:

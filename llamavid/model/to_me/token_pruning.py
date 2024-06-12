@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 
 
-def prune_top_k_tokens(video_tokens: torch.Tensor, text_tokens: torch.Tensor, k: int, labels: torch.Tensor = None):
+def text_topk_pruning(video_tokens: torch.Tensor, text_tokens: torch.Tensor, k: int, labels: torch.Tensor = None):
     """
     Returns the top_k video tokens that have the highest average cosine similarity with the text tokens.
     """
