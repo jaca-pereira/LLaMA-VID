@@ -24,7 +24,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, \
 
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from llamavid.model.llamavid_arch import LLaMAVIDMetaModel, LLaMAVIDMetaForCausalLM
+from llamavid.model.llamavid_arch_2 import LLaMAVIDMetaModel, LLaMAVIDMetaForCausalLM
 
 
 class LlavaConfig(LlamaConfig):
