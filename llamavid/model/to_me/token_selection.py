@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 
 
-def do_nothing(x, mode=None):
+def do_nothing(x: torch.Tensor) -> torch.Tensor:
     return x
 
 def kth_bipartite_soft_matching_pooling(
@@ -29,7 +29,7 @@ def kth_bipartite_soft_matching_pooling(
     z = 2 is equivalent to regular bipartite_soft_matching with r = 0.5 * N
     """
     if k <= 1:
-        return do_nothing, do_nothing
+        return do_nothing
 
     def split(x):
         t_rnd = (x.shape[1] // k) * k
@@ -56,3 +56,16 @@ def kth_bipartite_soft_matching_pooling(
         return dst
 
     return pool
+
+
+def merge_source(
+    merge: Callable, x: torch.Tensor, mode: str = "mean") -> torch.Tensor:
+    """
+    For source tracking. Source is an adjacency matrix between the initial tokens and final merged groups.
+    x is used to find out how many tokens there are in case the source is None.
+    """
+
+    n, t, _ = x.shape
+    source = torch.eye(t, device=x.device)[None, ...].expand(n, t, t)
+    source = merge(source, mode=mode)
+    return source
