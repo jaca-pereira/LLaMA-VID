@@ -34,7 +34,7 @@ from llamavid.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PA
 from transformers import CLIPTextModel, CLIPTokenizer
 
 from .to_me.text_token_pruning import text_topk_pruning
-from .to_me.token_selection import kth_bipartite_soft_matching_pooling
+from .to_me.token_selection import kth_bipartite_soft_matching_pooling, merge_source
 
 
 class LLaMAVIDMetaModel:
@@ -101,9 +101,10 @@ class LLaMAVIDMetaModel:
             self.text_model.to(self.vision_tower.device)
             self.text_token_pruning = text_topk_pruning
             self.text_tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
-        self.config.mm_token_source = getattr(self.config, 'mm_token_source', False) #True if source tokens are to be plotted
-        self.config.mm_redundant_token_selection = getattr(self.config, 'mm_redundant_token_selection', "amax")  #Options: "mean", "amax", "None"
-        self.token_selection = kth_bipartite_soft_matching_pooling
+        self.config.mm_token_source = getattr(self.config, 'mm_token_source', True) #True if source tokens are to be plotted
+        self.config.mm_redundant_token_selection = getattr(self.config, 'mm_redundant_token_selection', "mean")  #Options: "mean", "amax", "None"
+        self.token_selection = kth_bipartite_soft_matching_pooling if self.config.mm_redundant_token_selection is not None else None
+        self.token_source = merge_source if self.config.mm_token_source else None
 
 class LLaMAVIDMetaForCausalLM(ABC):
 
@@ -132,38 +133,48 @@ class LLaMAVIDMetaForCausalLM(ABC):
             #TODO what about when it is an image? what about labels?
         for i, image_feature in enumerate(image_features):
             if self.config.mm_redundant_token_selection is not None:
-                num_frames = image_feature.shape[0]
-                #kth = 2 ** (num_frames // 100 + 1)
-                kth = 4
+                kth = 2
                 image_feature = image_feature.reshape(image_feature.shape[0] * image_feature.shape[1], image_feature.shape[2])
                 image_feature = [image_feature[i: i + (16*256)] if i+(16*256) < len(image_feature) else image_feature[i:] for i in range(0, len(image_feature), (16*256))]
+                #image_feature = [image_feature]
                 new_image_feature = []
                 if self.config.mm_token_source:
                     sources = []
                 for clip_feature in image_feature:
                     clip_feature = clip_feature.unsqueeze(0)
+                    clip_feature_source = clip_feature.clone().detach()
                     pool = self.get_model().token_selection(clip_feature, kth)
                     clip_feature = pool(clip_feature, mode=self.config.mm_redundant_token_selection)
-                    if self.config.mm_token_source:
-                        sources.append(self.get_model().merge_source(pool, clip_feature, mode=self.config.mm_redundant_token_selection))
                     clip_feature = clip_feature.squeeze(0)
                     new_image_feature.append(clip_feature)
+                    if self.config.mm_token_source:
+                        pool_source = self.get_model().token_selection(clip_feature_source, kth)
+                        sources.append(self.get_model().token_source(pool_source, clip_feature_source, mode=self.config.mm_redundant_token_selection).squeeze(0))
                 image_feature = torch.cat(new_image_feature, dim=0)
                 if self.config.mm_token_source:
+                    if len(sources) > 1 and sources[-1].shape[-1] != sources[-2].shape[-1]:
+                        sources.pop(-1)
+                        new_image_feature.pop(-1)
+                        image_feature = torch.cat(new_image_feature, dim=0)
                     sources = torch.cat(sources, dim=0)
                 del new_image_feature
             if self.config.mm_text_token_pruning:
-                text_inputs = self.get_model().text_tokenizer(prompts[i], return_tensors="pt").to(device=self.device)
+                text_inputs = self.get_model().text_tokenizer(prompts[i][0], return_tensors="pt").to(device=self.device)
                 text_embeds = self.get_model().text_model(**text_inputs).last_hidden_state
+                text_embeds = text_embeds.squeeze(0)
                 num_non_image_tokens = (input_ids[i] != IMAGE_TOKEN_INDEX).sum()
                 if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
                     topk = max(0, self.config.max_length - num_non_image_tokens - 1).item()
                 else:
                     topk = max(0, self.config.max_length - num_non_image_tokens).item()
                 if self.config.mm_token_source:
-                    image_feature = self.get_model().text_token_pruning(image_feature, text_embeds, topk, sources)
+                    topk = 400
+                    if images.ndim == 4:
+                        image_feature = self.get_model().text_token_pruning(image_feature, text_embeds, topk, images, sources)
+                    else:
+                        image_feature = self.get_model().text_token_pruning(image_feature, text_embeds, topk, images[i], sources)
                 else:
-                    image_feature = self.get_model().text_token_pruning(image_feature, text_embeds, topk, )
+                    image_feature = self.get_model().text_token_pruning(image_feature, text_embeds, topk)
 
             image_feature = self.get_model().mm_projector(image_feature)
             image_features_list.append(image_feature)

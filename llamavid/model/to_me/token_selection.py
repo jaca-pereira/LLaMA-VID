@@ -68,4 +68,5 @@ def merge_source(
     n, t, _ = x.shape
     source = torch.eye(t, device=x.device)[None, ...].expand(n, t, t)
     source = merge(source, mode=mode)
+
     return source
