@@ -7,24 +7,23 @@ import numpy as np
 def plot_top_k_tokens(source_top_k_tokens: torch.Tensor, video: torch.Tensor):
     """ Plots the source patches of top k tokens in the video. """
     idx_patches = {}
+    num_patches = 0
     for i, map_idx in enumerate(source_top_k_tokens):
         source_top_k_tokens_idx = torch.where(map_idx == 1)
         if len(source_top_k_tokens_idx) == 0 or len(source_top_k_tokens_idx[0]) == 0:
             continue
-        elif len(source_top_k_tokens_idx) == 1:
-            idx_patches[i] = []
-            idx_patches[i].append(source_top_k_tokens_idx[0].item())
-        else:
-            idx_patches[i] = []
-            for j in range(len(source_top_k_tokens_idx)):
-                idx_patches[i].append(source_top_k_tokens_idx[j][0].item())
+        idx_patches[i] = []
+        for tpl in source_top_k_tokens_idx:
+            for idx in tpl:
+                idx_patches[i].append(idx.item())
+                num_patches += 1
 
-    num_patches = len(idx_patches)
     grid_size = math.ceil(math.sqrt(num_patches))
-    fig, axs = plt.subplots(grid_size, grid_size, figsize=(30, 20))
+    fig, axs = plt.subplots(grid_size, grid_size, figsize=(15, 15))
+    current_patch_n = 0
     for n, i in enumerate(idx_patches):
         idx_patches_i = torch.tensor(idx_patches[i], device=source_top_k_tokens.device)
-        # Calculate frame indices and patch indices
+
         frame_indices = idx_patches_i // 256
         patch_indices = idx_patches_i % 256
 
@@ -41,10 +40,11 @@ def plot_top_k_tokens(source_top_k_tokens: torch.Tensor, video: torch.Tensor):
             # patch = F.interpolate(patch.unsqueeze(0), size=(112, 112), mode='bilinear', align_corners=False)
             patch = patch.squeeze(0)
             patch = patch.permute(1, 2, 0).to('cpu').numpy().astype(float)
-            current_patch_n = n + j
             row_idx = current_patch_n // grid_size
             col_idx = current_patch_n % grid_size
             axs[row_idx, col_idx].imshow(patch)
+            axs[row_idx, col_idx].axis('off')
+            current_patch_n += 1
     plt.show()
     plt.close()
     exit(1)

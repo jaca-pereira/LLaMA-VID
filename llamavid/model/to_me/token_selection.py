@@ -14,10 +14,10 @@ import torch
 import torch.nn as nn
 
 
-def do_nothing(x: torch.Tensor) -> torch.Tensor:
+def do_nothing(x: torch.Tensor, mode: str=None) -> torch.Tensor:
     return x
 
-def kth_bipartite_soft_matching_pooling(
+def kth_bipartite_soft_matching(
     metric: torch.Tensor, k: int
 ) -> Tuple[Callable, Callable]:
     """
@@ -29,7 +29,7 @@ def kth_bipartite_soft_matching_pooling(
     z = 2 is equivalent to regular bipartite_soft_matching with r = 0.5 * N
     """
     if k <= 1:
-        return do_nothing
+        return do_nothing, do_nothing
 
     def split(x):
         t_rnd = (x.shape[1] // k) * k
@@ -49,24 +49,57 @@ def kth_bipartite_soft_matching_pooling(
         _, dst_idx = scores.max(dim=-1)
         dst_idx = dst_idx[..., None]
 
-    def pool(x: torch.Tensor, mode="mean") -> torch.Tensor:
+    def merge(x: torch.Tensor, mode="mean") -> torch.Tensor:
         src, dst = split(x)
         n, _, c = src.shape
         dst = dst.scatter_reduce(-2, dst_idx.expand(n, r, c), src, reduce=mode)
+
         return dst
 
-    return pool
+    def unmerge(x: torch.Tensor) -> torch.Tensor:
+        n, _, c = x.shape
+        dst = x
+
+        src = dst.gather(dim=-2, index=dst_idx.expand(n, r, c)).to(x.dtype)
+
+        src = src.view(n, -1, (k - 1), c)
+        dst = dst.view(n, -1, 1, c)
+
+        out = torch.cat([src, dst], dim=-2)
+        out = out.contiguous().view(n, -1, c)
+
+        return out
+
+    return merge, unmerge
+
+
+def merge_wavg(
+    merge: Callable, x: torch.Tensor, size: torch.Tensor = None, mode: str = "sum"
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Applies the merge function by taking a weighted average based on token size.
+    Returns the merged tensor and the new token sizes.
+    """
+    if size is None:
+        size = torch.ones_like(x[..., 0, None])
+
+    x = merge(x * size, mode=mode)
+    size = merge(size, mode=mode)
+
+    x = x / size
+    return x, size
 
 
 def merge_source(
-    merge: Callable, x: torch.Tensor, mode: str = "mean") -> torch.Tensor:
+    merge: Callable, x: torch.Tensor, source: torch.Tensor = None
+) -> torch.Tensor:
     """
     For source tracking. Source is an adjacency matrix between the initial tokens and final merged groups.
     x is used to find out how many tokens there are in case the source is None.
     """
+    if source is None:
+        n, t, _ = x.shape
+        source = torch.eye(t, device=x.device)[None, ...].expand(n, t, t)
 
-    n, t, _ = x.shape
-    source = torch.eye(t, device=x.device)[None, ...].expand(n, t, t)
-    source = merge(source, mode=mode)
-
+    source = merge(source, mode="sum")
     return source
