@@ -14,7 +14,7 @@ deepspeed --module llamavid.train.train_mem \
     --deepspeed ./scripts/zero2.json \
     --model_name_or_path model_zoo/LLM/vicuna/7B-V1.5 \
     --version plain_guided \
-    --data_path ./data/LLaMA-VID-Pretrain/subsample_llava_with_webvid.json \
+    --data_path ./data/LLaMA-VID-Pretrain/llava_with_webvid.json \
     --image_folder ./data/LLaMA-VID-Pretrain/ \
     --video_folder ./data/LLaMA-VID-Pretrain/ \
     --vision_tower ./model_zoo/LAVIS/eva_vit_g.pth \
@@ -26,7 +26,7 @@ deepspeed --module llamavid.train.train_mem \
     --mm_use_im_patch_token False \
     --video_fps 1 \
     --bf16 True \
-    --output_dir ./work_dirs/llama-vid-token-reduction-7b-pretrain-224-video-fps-1 \
+    --output_dir ./work_dirs/llama-vid-clip-text-token-reduction-7b-pretrain-224-video-fps-1 \
     --num_train_epochs 1 \
     --per_device_train_batch_size 16 \
     --per_device_eval_batch_size 16 \
@@ -67,9 +67,9 @@ deepspeed llamavid/train/train_mem.py \
     --bf16 True \
     --output_dir ./work_dirs/llama-vid-token-reduction-7b-full-224-video-fps-1  \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 2 \
-    --per_device_eval_batch_size 2 \
-    --gradient_accumulation_steps 8 \
+    --per_device_train_batch_size 1 \
+    --per_device_eval_batch_size 1 \
+    --gradient_accumulation_steps 16 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
     --save_steps 500 \
@@ -80,7 +80,7 @@ deepspeed llamavid/train/train_mem.py \
     --lr_scheduler_type "cosine" \
     --logging_steps 1 \
     --tf32 True \
-    --model_max_length 2048 \
+    --model_max_length 4096 \
     --gradient_checkpointing True \
     --dataloader_num_workers 4 \
     --lazy_preprocess True \

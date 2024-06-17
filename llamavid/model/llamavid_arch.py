@@ -134,7 +134,7 @@ class LLaMAVIDMetaForCausalLM(ABC):
                 if num_frames < 16:
                     kth = 1
                 else:
-                    kth = 2
+                    kth = 4
                 #print(f"Using kth: {kth}")
                 image_feature = image_feature.reshape(image_feature.shape[0] * image_feature.shape[1], image_feature.shape[2])
                 image_feature = [image_feature[i: i + (16*256)] if i+(16*256) < len(image_feature) else image_feature[i:] for i in range(0, len(image_feature), (16*256))]
@@ -162,10 +162,15 @@ class LLaMAVIDMetaForCausalLM(ABC):
                 text_embeds = self.get_model().text_model(**text_inputs).last_hidden_state
                 text_embeds = text_embeds.squeeze(0)
                 num_non_image_tokens = (input_ids[i] != IMAGE_TOKEN_INDEX).sum()
+
                 if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
-                    topk = min(max(0, self.config.max_length - num_non_image_tokens - 1), image_feature.shape[0])
+                    topk = self.config.max_length - num_non_image_tokens - 1
                 else:
-                    topk = min(max(0, self.config.max_length - num_non_image_tokens), image_feature.shape[0])
+                    topk = self.config.max_length - num_non_image_tokens
+
+                if topk > image_feature.shape[0]:
+                    topk = image_feature.shape[0]
+
                 if self.config.mm_token_source:
                     topk = 50
                     if images.ndim == 4:
@@ -178,7 +183,7 @@ class LLaMAVIDMetaForCausalLM(ABC):
             image_feature = self.get_model().mm_projector(image_feature)
             image_features_list.append(image_feature)
 
-        return torch.stack(image_features_list, dim=0)
+        return image_features_list
 
     def update_prompt(self, prompts=None):
         self.prompts = prompts
@@ -212,6 +217,7 @@ class LLaMAVIDMetaForCausalLM(ABC):
         else:
             image_features = self.encode_images(images, prompts, long_video=long_video, input_ids = input_ids)
 
+        num_inps = len(image_features)
         new_input_embeds = []
         new_labels = [] if labels is not None else None
         cur_image_idx = 0
@@ -230,7 +236,10 @@ class LLaMAVIDMetaForCausalLM(ABC):
                 new_input_embeds.append(cur_input_embeds)
                 if labels is not None:
                     new_labels.append(labels[batch_idx])
-                cur_image_idx += 1
+
+                if cur_image_idx + 1 < num_inps:
+                    cur_image_idx += 1
+
                 continue
 
             image_token_indices = torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0]
@@ -241,12 +250,11 @@ class LLaMAVIDMetaForCausalLM(ABC):
                 assert cur_labels.shape == cur_input_ids.shape
 
             if not long_video:
-                token_idx = 0
                 while image_token_indices.numel() > 0:
                     if isinstance(image_features, list):
-                        cur_image_features = image_features[cur_image_idx][token_idx]
-                    else:
                         cur_image_features = image_features[cur_image_idx]
+                    else:
+                        cur_image_features = image_features
                     image_token_start = image_token_indices[0]
 
                     if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config,
@@ -280,10 +288,10 @@ class LLaMAVIDMetaForCausalLM(ABC):
                     else:
                         cur_input_ids = cur_input_ids[image_token_start + 1:]
                     image_token_indices = torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0]
-                    token_idx += 1
 
                 # changle image idx after processing one sample
-                cur_image_idx += 1
+                if cur_image_idx + 1 < num_inps:
+                    cur_image_idx += 1
                 if cur_input_ids.numel() > 0:
                     if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config,
                                                                                       'mm_use_im_start_end', False):
@@ -292,6 +300,7 @@ class LLaMAVIDMetaForCausalLM(ABC):
                         cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids))
                     if labels is not None:
                         cur_new_labels.append(cur_labels)
+
                 cur_new_input_embeds = [x.to(device=self.device) for x in cur_new_input_embeds]
                 cur_new_input_embeds = torch.cat(cur_new_input_embeds, dim=0)
                 new_input_embeds.append(cur_new_input_embeds)
@@ -316,7 +325,8 @@ class LLaMAVIDMetaForCausalLM(ABC):
                 new_input_embeds.append(cur_new_input_embeds)
                 if labels is not None:
                     new_labels.append(cur_labels)
-                cur_image_idx += 1
+                if cur_image_idx + 1 < num_inps:
+                    cur_image_idx += 1
 
         if any(x.shape != new_input_embeds[0].shape for x in new_input_embeds):
             max_len = max(x.shape[0] for x in new_input_embeds)

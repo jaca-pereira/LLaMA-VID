@@ -1217,6 +1217,8 @@ def train():
 
     data_module = make_supervised_data_module(tokenizer=tokenizer,
                                               data_args=data_args)
+
+    model.config.max_length = training_args.model_max_length
     trainer = LLaVATrainer(model=model,
                            tokenizer=tokenizer,
                            args=training_args,
@@ -1229,7 +1231,6 @@ def train():
     trainer.save_state()
 
     model.config.use_cache = True
-
     if training_args.lora_enable:
         state_dict = get_peft_state_maybe_zero_3(
             model.named_parameters(), training_args.lora_bias

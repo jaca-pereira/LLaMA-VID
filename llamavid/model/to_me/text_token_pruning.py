@@ -59,7 +59,6 @@ def text_topk_pruning(video_tokens: torch.Tensor, text_tokens: torch.Tensor, k: 
     normalized_video_tokens = video_tokens / video_tokens.norm(p=2, dim=-1, keepdim=True)
     normalized_text_tokens = text_tokens / text_tokens.norm(p=2, dim=-1, keepdim=True)
     normalized_text_tokens = torch.nn.functional.pad(normalized_text_tokens, (0, normalized_video_tokens.shape[-1] - normalized_text_tokens.shape[-1]))
-    normalized_text_tokens = normalized_text_tokens.half()
 
     sim = normalized_video_tokens @ normalized_text_tokens.transpose(-1, -2)  # shape becomes [batch_size, num_video_tokens, num_text_tokens]
 
