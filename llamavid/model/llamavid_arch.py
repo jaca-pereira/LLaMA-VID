@@ -153,15 +153,21 @@ class LLaMAVIDMetaForCausalLM(ABC):
             image_features = image_features.unsqueeze(0)
         for i, image_feature in enumerate(image_features):
             if self.config.mm_redundant_token_selection is not None:
+                num_frames = image_feature.shape[0]
+                if num_frames == 1:
+                    kth = 1
+                else:
+                    kth = 2
                 image_feature = image_feature.reshape(image_feature.shape[0] * image_feature.shape[1], image_feature.shape[2])
-                image_feature = [image_feature[i: i + (16*256)] if i+(16*256) < len(image_feature) else image_feature[i:] for i in range(0, len(image_feature), (16*256))]
-                image_feature = [clip.unsqueeze(0) for clip in image_feature]
-                merges = [bipartite_soft_matching(metric=clip, r=clip.shape[1]//2) for clip in image_feature]
-                if self.config.mm_token_source:
-                    sources = [merge_source(merge, clip)[0] for merge, clip in zip(merges, image_feature)]
-                new_image_feature = [merge[0](clip, mode=self.config.mm_redundant_token_selection)[0] for
-                                     merge, clip in zip(merges, image_feature)]
-                image_feature = torch.cat(new_image_feature, dim=0)
+                for ki in range(kth):
+                    image_feature = [image_feature[i: i + (16*256)] if i+(16*256) < len(image_feature) else image_feature[i:] for i in range(0, len(image_feature), (16*256))]
+                    image_feature = [clip.unsqueeze(0) for clip in image_feature]
+                    merges = [bipartite_soft_matching(metric=clip, r=clip.shape[1]//2) for clip in image_feature]
+                    if self.config.mm_token_source:
+                        sources = [merge_source(merge, clip)[0] for merge, clip in zip(merges, image_feature)]
+                    new_image_feature = [merge[0](clip, mode=self.config.mm_redundant_token_selection)[0] for
+                                         merge, clip in zip(merges, image_feature)]
+                    image_feature = torch.cat(new_image_feature, dim=0)
                 if self.config.mm_token_source:
                     if len(sources) > 1 and sources[-1].shape[-1] != sources[-2].shape[-1]:
                         sources.pop(-1)
