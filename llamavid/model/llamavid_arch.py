@@ -35,7 +35,7 @@ from transformers import CLIPTextModel, CLIPTokenizer
 
 from .to_me.text_token_pruning import text_topk_pruning
 from .to_me.token_selection import kth_bipartite_soft_matching, merge_source, merge_wavg
-
+import spacy
 
 class LLaMAVIDMetaModel:
 
@@ -101,6 +101,7 @@ class LLaMAVIDMetaModel:
             self.text_model.to(self.vision_tower.device)
             self.text_token_pruning = text_topk_pruning
             self.text_tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
+            self.nlp = spacy.load("en_core_web_sm")
         self.config.mm_token_source = getattr(self.config, 'mm_token_source', False) #True if source tokens are to be plotted
         self.config.mm_redundant_token_selection = getattr(self.config, 'mm_redundant_token_selection', "sum")  #Options: "mean", "amax", "sum". "None"
 
@@ -158,7 +159,11 @@ class LLaMAVIDMetaForCausalLM(ABC):
                     sources = torch.cat(sources, dim=0)
                 del new_image_feature
             if self.config.mm_text_token_pruning:
-                text_inputs = self.get_model().text_tokenizer(prompts[i][0], return_tensors="pt").to(device=self.device)
+                doc = self.nlp(prompts[i][0])
+                object_adjectives = [f'{token.text} {child.text}' for child in token.children if child.pos_ == "ADJ" for token in doc if token.pos_ == "NOUN"]
+                verbs = [token.text for token in doc if token.pos_ == "VERB"]
+                text_inputs = object_adjectives.extend(verbs)
+                text_inputs = self.get_model().text_tokenizer(text_inputs, return_tensors="pt").to(device=self.device)
                 text_embeds = self.get_model().text_model(**text_inputs).last_hidden_state
                 text_embeds = text_embeds.squeeze(0)
                 num_non_image_tokens = (input_ids[i] != IMAGE_TOKEN_INDEX).sum()

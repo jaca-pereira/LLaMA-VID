@@ -26,7 +26,7 @@ def annotate(prediction_set, caption_files, output_dir):
     Returns a score for correctness.
     """
     for file in tqdm(caption_files):
-        key = file[:-5] # Strip file extension
+        key = file[:-5]  # Strip file extension
         qa_set = prediction_set[key]
         question = qa_set['q']
         answer = qa_set['a']
@@ -38,7 +38,7 @@ def annotate(prediction_set, caption_files, output_dir):
                 messages=[
                     {
                         "role": "system",
-                        "content": 
+                        "content":
                             "You are an intelligent chatbot designed for evaluating the correctness of generative outputs for question-answer pairs. "
                             "Your task is to compare the predicted answer with the correct answer and determine if they match meaningfully. Here's how you can accomplish the task:"
                             "------"
@@ -131,9 +131,9 @@ def main():
         prediction_set[id] = qa_set
 
     # Set the OpenAI API key.
-    openai.api_key = args.api_key # Your API key here
+    openai.api_key = args.api_key  # Your API key here
     if args.api_base:
-        openai.api_base = args.api_base # Your API base here
+        openai.api_base = args.api_base  # Your API base here
     num_tasks = args.num_tasks
 
     # While loop to ensure that all captions are processed.
@@ -187,7 +187,7 @@ def main():
     count = 0
     yes_count = 0
     no_count = 0
-        
+
     for key, result in combined_contents.items():
         # Computing score
         count += 1
@@ -200,7 +200,7 @@ def main():
             pred = result[0]['pred']
         except:
             pred = result[0]['predicted']
-        
+
         if "yes" in pred.lower():
             yes_count += 1
         elif "no" in pred.lower():
