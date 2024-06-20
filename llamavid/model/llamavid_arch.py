@@ -15,7 +15,7 @@
 # Modified from LLaVA (https://github.com/haotian-liu/LLaVA)
 # Copyright 2023 Yanwei Li
 # ------------------------------------------------------------------------
-
+import time
 from abc import ABC, abstractmethod
 import os
 import json
@@ -34,8 +34,9 @@ from llamavid.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PA
 from transformers import CLIPTextModel, CLIPTokenizer
 
 from .to_me.text_token_pruning import text_topk_pruning
-from .to_me.token_selection import kth_bipartite_soft_matching, merge_source, merge_wavg
+from .to_me.token_selection import kth_bipartite_soft_matching, merge_source, merge_wavg, bipartite_soft_matching
 import spacy
+
 
 class LLaMAVIDMetaModel:
 
@@ -102,6 +103,27 @@ class LLaMAVIDMetaModel:
             self.text_token_pruning = text_topk_pruning
             self.text_tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
             self.nlp = spacy.load("en_core_web_sm")
+
+            def extract_nouns_adjectives_verbs(nlp, text):
+                # Process the text
+                doc = nlp(text)
+
+                # Initialize lists to store nouns, adjectives, and verbs
+                nouns_adjectives_verbs = []
+
+                # Iterate through tokens in the processed document
+                for token in doc:
+                    # Check if the token is a noun
+                    if token.pos_ == 'NOUN':
+                        for child in token.children:
+                            if child.pos_ == 'ADJ':
+                                nouns_adjectives_verbs.append(f'{child.text} {token.text}')
+                    # Check if the token is a verb
+                    elif token.pos_ == 'VERB':
+                        nouns_adjectives_verbs.append(token.text)
+
+                return nouns_adjectives_verbs
+            self.extract_nouns_adjectives_verbs = extract_nouns_adjectives_verbs
         self.config.mm_token_source = getattr(self.config, 'mm_token_source', False) #True if source tokens are to be plotted
         self.config.mm_redundant_token_selection = getattr(self.config, 'mm_redundant_token_selection', "sum")  #Options: "mean", "amax", "sum". "None"
 
@@ -131,25 +153,14 @@ class LLaMAVIDMetaForCausalLM(ABC):
             image_features = image_features.unsqueeze(0)
         for i, image_feature in enumerate(image_features):
             if self.config.mm_redundant_token_selection is not None:
-                num_frames = image_feature.shape[0]
-                if num_frames < 16:
-                    kth = 1
-                else:
-                    kth = 4
-                #print(f"Using kth: {kth}")
                 image_feature = image_feature.reshape(image_feature.shape[0] * image_feature.shape[1], image_feature.shape[2])
                 image_feature = [image_feature[i: i + (16*256)] if i+(16*256) < len(image_feature) else image_feature[i:] for i in range(0, len(image_feature), (16*256))]
-                #image_feature = [image_feature]
-                new_image_feature = []
+                image_feature = [clip.unsqueeze(0) for clip in image_feature]
+                merges = [bipartite_soft_matching(metric=clip, r=clip.shape[1]//2) for clip in image_feature]
                 if self.config.mm_token_source:
-                    sources = []
-                for clip_feature in image_feature:
-                    clip_feature = clip_feature.unsqueeze(0)
-                    merge, _ = kth_bipartite_soft_matching(metric=clip_feature, k=kth)
-                    if self.config.mm_token_source:
-                        sources.append(merge_source(merge, clip_feature)[0])
-                    new_image_feature.append(merge_wavg(merge, clip_feature, mode=self.config.mm_redundant_token_selection)[0][0])
-
+                    sources = [merge_source(merge, clip)[0] for merge, clip in zip(merges, image_feature)]
+                new_image_feature = [merge[0](clip, mode=self.config.mm_redundant_token_selection)[0] for
+                                     merge, clip in zip(merges, image_feature)]
                 image_feature = torch.cat(new_image_feature, dim=0)
                 if self.config.mm_token_source:
                     if len(sources) > 1 and sources[-1].shape[-1] != sources[-2].shape[-1]:
@@ -159,15 +170,11 @@ class LLaMAVIDMetaForCausalLM(ABC):
                     sources = torch.cat(sources, dim=0)
                 del new_image_feature
             if self.config.mm_text_token_pruning:
-                doc = self.nlp(prompts[i][0])
-                object_adjectives = [f'{token.text} {child.text}' for child in token.children if child.pos_ == "ADJ" for token in doc if token.pos_ == "NOUN"]
-                verbs = [token.text for token in doc if token.pos_ == "VERB"]
-                text_inputs = object_adjectives.extend(verbs)
-                text_inputs = self.get_model().text_tokenizer(text_inputs, return_tensors="pt").to(device=self.device)
+                text_inputs = self.get_model().extract_nouns_adjectives_verbs(self.get_model().nlp, prompts[i][0])
+                text_inputs = self.get_model().text_tokenizer(text_inputs, return_tensors="pt", truncation=True, padding=True).to(device=self.device)
                 text_embeds = self.get_model().text_model(**text_inputs).last_hidden_state
-                text_embeds = text_embeds.squeeze(0)
+                text_embeds = text_embeds.half()
                 num_non_image_tokens = (input_ids[i] != IMAGE_TOKEN_INDEX).sum()
-
                 if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
                     topk = self.config.max_length - num_non_image_tokens - 1
                 else:
