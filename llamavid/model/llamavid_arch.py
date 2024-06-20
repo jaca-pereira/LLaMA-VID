@@ -177,9 +177,9 @@ class LLaMAVIDMetaForCausalLM(ABC):
                 del new_image_feature
             if self.config.mm_text_token_pruning:
                 text_inputs = self.get_model().extract_nouns_adjectives_verbs(self.get_model().nlp, prompts[i][0])
-                text_inputs = self.get_model().text_tokenizer(text_inputs, return_tensors="pt", truncation=True, padding=True).to(device=self.device)
+                text_inputs = self.get_model().text_tokenizer(text_inputs, return_tensors="pt", truncation=True, padding=True).to(device=image_feature.device)
                 text_embeds = self.get_model().text_model(**text_inputs).last_hidden_state
-                text_embeds = text_embeds.type(torch.float16)
+                text_embeds = text_embeds.type(image_feature.dtype)
                 num_non_image_tokens = (input_ids[i] != IMAGE_TOKEN_INDEX).sum()
                 if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
                     topk = self.config.max_length - num_non_image_tokens - 1
