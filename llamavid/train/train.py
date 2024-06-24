@@ -984,6 +984,8 @@ class LazySupervisedDataset(Dataset):
         if prompt is not None:
             data_dict['prompt'] = prompt
 
+        data_dict['index'] = i
+
         return data_dict
 
 

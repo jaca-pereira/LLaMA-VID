@@ -11,7 +11,7 @@ import math
 from typing import Callable, Tuple
 
 import torch
-import torch.nn as nn
+import torch.nn.functional as F
 
 
 def do_nothing(x: torch.Tensor, mode: str=None) -> torch.Tensor:
@@ -76,30 +76,20 @@ def kth_bipartite_soft_matching(
 def bipartite_soft_matching(
     metric: torch.Tensor,
     r: int,
-    class_token: bool = False,
-    distill_token: bool = False,
+    bucket_size: int = 4096
 ) -> Tuple[Callable, Callable]:
     """
     Applies ToMe with a balanced matching set (50%, 50%).
 
     Input size is [batch, tokens, channels].
     r indicates the number of tokens to remove (max 50% of tokens).
+    bucket_size indicates the size of the bucket for the bipartite matching.
 
-    Extra args:
-     - class_token: Whether or not there's a class token.
-     - distill_token: Whether or not there's also a distillation token.
-
-    When enabled, the class token and distillation tokens won't get merged.
     """
-    protected = 0
-    if class_token:
-        protected += 1
-    if distill_token:
-        protected += 1
 
     # We can only reduce by a maximum of 50% tokens
-    t = metric.shape[1]
-    r = min(r, (t - protected) // 2)
+    t = metric.shape[0]
+    r = min(r, t // 2)
 
     if r <= 0:
         return do_nothing, do_nothing
@@ -107,12 +97,33 @@ def bipartite_soft_matching(
     with torch.no_grad():
         metric = metric / metric.norm(dim=-1, keepdim=True)
         a, b = metric[..., ::2, :], metric[..., 1::2, :]
-        scores = a @ b.transpose(-1, -2)
 
-        if class_token:
-            scores[..., 0, :] = -math.inf
-        if distill_token:
-            scores[..., :, 0] = -math.inf
+        # apply penalty to tokens from different clips
+
+        n = a.shape[0]
+        padding_size = (bucket_size - (n % bucket_size)) % bucket_size
+
+        # padd a and b to be divisible by bucket_size
+        a_padded = F.pad(a, (0, 0, 0, padding_size))
+        b_padded = F.pad(b, (0, 0, 0, padding_size))
+
+        n_padded = a_padded.shape[0]
+        n_buckets = n_padded // bucket_size
+
+        # Reshape a_padded and b_padded into (n_buckets, bucket_size, d)
+        a_buckets = a_padded.view(n_buckets, bucket_size, -1)
+        b_buckets = b_padded.view(n_buckets, bucket_size, -1)
+
+        # Compute dot product similarity within each bucket
+
+        scores_padded = torch.full((n_padded, n_padded), -math.inf, device=metric.device)
+        for i in range(n_buckets):
+            a_normalized = F.normalize(a_buckets[i])
+            b_normalized = F.normalize(b_buckets[i].transpose(1, 0))
+            scores_padded[i * bucket_size:(i + 1) * bucket_size, i * bucket_size:(i + 1) * bucket_size] = a_normalized @ b_normalized
+
+        # Trim the padding
+        scores = scores_padded[:n, :n]
 
         node_max, node_idx = scores.max(dim=-1)
         edge_idx = node_max.argsort(dim=-1, descending=True)[..., None]
@@ -121,21 +132,13 @@ def bipartite_soft_matching(
         src_idx = edge_idx[..., :r, :]  # Merged Tokens
         dst_idx = node_idx[..., None].gather(dim=-2, index=src_idx)
 
-        if class_token:
-            # Sort to ensure the class token is at the start
-            unm_idx = unm_idx.sort(dim=1)[0]
-
     def merge(x: torch.Tensor, mode="mean") -> torch.Tensor:
         src, dst = x[..., ::2, :], x[..., 1::2, :]
-        n, t1, c = src.shape
-        unm = src.gather(dim=-2, index=unm_idx.expand(n, t1 - r, c))
-        src = src.gather(dim=-2, index=src_idx.expand(n, r, c))
-        dst = dst.scatter_reduce(-2, dst_idx.expand(n, r, c), src, reduce=mode)
-
-        if distill_token:
-            return torch.cat([unm[:, :1], dst[:, :1], unm[:, 1:], dst[:, 1:]], dim=1)
-        else:
-            return torch.cat([unm, dst], dim=1)
+        t1, c = src.shape
+        unm = src.gather(dim=-2, index=unm_idx.expand(t1 - r, c))
+        src = src.gather(dim=-2, index=src_idx.expand(r, c))
+        dst = dst.scatter_reduce(-2, dst_idx.expand(r, c), src, reduce=mode)
+        return torch.cat([unm, dst], dim=0)
 
     def unmerge(x: torch.Tensor) -> torch.Tensor:
         unm_len = unm_idx.shape[1]

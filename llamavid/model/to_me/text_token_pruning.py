@@ -2,7 +2,7 @@ import math
 
 import torch
 import matplotlib.pyplot as plt
-import numpy as np
+import torch.nn.functional as F
 
 def plot_top_k_tokens(source_top_k_tokens: torch.Tensor, video: torch.Tensor):
     """ Plots the source patches of top k tokens in the video. """
@@ -55,13 +55,7 @@ def text_topk_pruning(video_tokens: torch.Tensor, text_tokens: torch.Tensor, k: 
     Returns the top_k video tokens that have the highest average cosine similarity with the text tokens.
     """
 
-    # Normalize the tokens and store in new variables
-    normalized_video_tokens = video_tokens / video_tokens.norm(p=2, dim=-1, keepdim=True)
-    normalized_text_tokens = text_tokens / text_tokens.norm(p=2, dim=-1, keepdim=True)
-    normalized_text_tokens = torch.nn.functional.pad(normalized_text_tokens, (0, normalized_video_tokens.shape[-1] - normalized_text_tokens.shape[-1]))
-
-    sim = normalized_text_tokens @ normalized_video_tokens.transpose(-2, -1)  # shape becomes [batch_size, num_video_tokens, num_text_tokens]
-
+    sim = F.pad(F.normalize(text_tokens), (0, video_tokens.shape[-1] - text_tokens.shape[-1])) @ F.normalize(video_tokens).t()
 
     sim = sim.sum(1).sum(0)
 
