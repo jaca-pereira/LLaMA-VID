@@ -2,12 +2,11 @@
 
 eval "$(conda shell.bash hook)"
 
-conda activate llamavid2
+conda activate llamavid
 
 echo $CONDA_DEFAULT_ENV
 
-#cd ~/data/LLaMA-VID
-cd ~/Desktop/LLaMA-VID
+cd ~/data/LLaMA-VID
 
 python -m scripts.extra_tool.extract_training_features.py \
     --model_name_or_path model_zoo/LLM/vicuna/7B-V1.5 \
