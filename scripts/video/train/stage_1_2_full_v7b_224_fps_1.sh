@@ -41,22 +41,27 @@ deepspeed --module llamavid.train.train_mem \
     --lr_scheduler_type "cosine" \
     --logging_steps 1 \
     --tf32 True \
-    --model_max_length 2048 \
+    --model_max_length 4098 \
     --gradient_checkpointing True \
     --dataloader_num_workers 4 \
     --lazy_preprocess True \
+    --lora_enable True \
+    --lora_r 128 \
+    --lora_alpha 16 \
+    --lora_dropout 0.05 \
+    --lora_bias "none" \
     --report_to wandb
 
 deepspeed llamavid/train/train_mem.py \
     --deepspeed ./scripts/zero2_offload.json \
     --model_name_or_path model_zoo/LLM/vicuna/7B-V1.5 \
     --version imgsp_v1 \
-    --data_path ./data/LLaMA-VID-Finetune/subsample_llava_v1_5_mix665k_with_video_chatgpt_maxtime_5min.json \
+    --data_path ./data/LLaMA-VID-Finetune/llava_v1_5_mix665k_with_video_chatgpt_maxtime_5min.json \
     --image_folder ./data/LLaMA-VID-Finetune \
     --video_folder ./data/LLaMA-VID-Finetune \
     --vision_tower ./model_zoo/LAVIS/eva_vit_g.pth \
     --image_processor ./llamavid/processor/clip-patch14-224 \
-    --pretrain_mm_mlp_adapter ./work_dirs/llama-vid-token-reduction-7b-pretrain-224-video-fps-1/mm_projector.bin \
+    --pretrain_mm_mlp_adapter ./work_dirs/llama-vid-clip-text-token-reduction-7b-pretrain-224-video-fps-1/mm_projector.bin \
     --mm_projector_type mlp2x_gelu \
     --mm_vision_select_layer -2 \
     --mm_use_im_start_end False \
@@ -65,7 +70,7 @@ deepspeed llamavid/train/train_mem.py \
     --group_by_modality_length True \
     --video_fps 1 \
     --bf16 True \
-    --output_dir ./work_dirs/llama-vid-token-reduction-7b-full-224-video-fps-1  \
+    --output_dir ./work_dirs/llama-vid-clip-text-token-reduction-7b-full-224-video-fps-1  \
     --num_train_epochs 1 \
     --per_device_train_batch_size 1 \
     --per_device_eval_batch_size 1 \
@@ -80,8 +85,13 @@ deepspeed llamavid/train/train_mem.py \
     --lr_scheduler_type "cosine" \
     --logging_steps 1 \
     --tf32 True \
-    --model_max_length 4096 \
+    --model_max_length 8192 \
     --gradient_checkpointing True \
     --dataloader_num_workers 4 \
     --lazy_preprocess True \
+    --lora_enable True \
+    --lora_r 128 \
+    --lora_alpha 16 \
+    --lora_dropout 0.05 \
+    --lora_bias "none" \
     --report_to wandb

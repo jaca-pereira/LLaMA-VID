@@ -6,7 +6,7 @@ import torch
 import transformers
 from tqdm import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
-from llamavid.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN, IGNORE_INDEX, \
+from llamavid.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN, \
     IMAGE_TOKEN_INDEX
 from llamavid.model.multimodal_encoder.eva_vit import EVAVisionTowerLavis
 import pickle
@@ -20,7 +20,7 @@ class TokenSelection:
         self.text_model = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14")
         self.text_model.eval()
         self.text_model.requires_grad_(False)
-        self.text_model.to('cuda')
+        self.text_model.to('cuda:0')
         self.text_token_pruning = text_topk_pruning
         self.text_tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
         self.nlp = spacy.load("en_core_web_sm")
@@ -49,7 +49,7 @@ class TokenSelection:
 
         self.extract_nouns_adjectives_verbs = extract_nouns_adjectives_verbs
 
-    def merge_and_prune_tokens(self, image_feature, prompt, input_ids):
+    def merge_and_prune_tokens(self, image_feature, prompts, input_ids):
 
         image_feature = image_feature[..., 1:, :]
         num_frames = image_feature.shape[0]
@@ -61,16 +61,23 @@ class TokenSelection:
         for ki in range(kth):
             merge, _ = bipartite_soft_matching(metric=image_feature, r=image_feature.shape[0]//2)
             image_feature, _ = merge_wavg(merge, image_feature)
-        text_inputs = self.extract_nouns_adjectives_verbs(prompt, self.nlp)
-        text_inputs = self.text_tokenizer(text_inputs, return_tensors="pt", truncation=True, padding=True).to(device=image_feature.device)
-        text_embeds = self.text_model(**text_inputs).last_hidden_state
-        text_embeds = text_embeds.type(image_feature.dtype)
+        text_embeds = None
+        for prompt in prompts:
+            text_inputs = self.extract_nouns_adjectives_verbs(prompt, self.nlp)
+            text_inputs = self.text_tokenizer(text_inputs, return_tensors="pt", truncation=True, padding=True).to(device=image_feature.device)
+            if text_embeds is None:
+                text_embeds = self.text_model(**text_inputs).last_hidden_state
+                text_embeds = text_embeds.type(image_feature.dtype)
+            else:
+                text_embeds_i = self.text_model(**text_inputs).last_hidden_state
+                text_embeds_i = text_embeds_i.type(image_feature.dtype)
+                text_embeds = torch.cat([text_embeds, text_embeds_i], dim=0)
+
         num_non_image_tokens = (input_ids != IMAGE_TOKEN_INDEX).sum()
         topk = self.max_length - num_non_image_tokens - 1
         if topk > image_feature.shape[0]:
             topk = image_feature.shape[0]
         image_feature = self.text_token_pruning(image_feature, text_embeds, topk)
-
         return image_feature
 
 def parse_args():
@@ -83,8 +90,9 @@ def parse_args():
     parser.add_argument("--mm_use_im_start_end", type=bool, default=False)
     parser.add_argument("--vision_tower", type=str, default="./model_zoo/LAVIS/eva_vit_g.pth")
     parser.add_argument("--image_processor", type=str, default="./llamavid/processor/clip-patch14-224")
+    parser.add_argument("--image_aspect_ratio", type=str, default="square")
     parser.add_argument("--bf16", type=bool, default=True)
-    parser.add_argument("--feat_dir", type=str, default="./data/LLaMA-VID-Finetune/clip-text-token-reduction-pretrain")
+    parser.add_argument("--feat_dir", type=str, default="./data/LLaMA-VID-Finetune/clip-text-token-reduction-full-features")
     parser.add_argument("--video_fps", type=int, default=1)
     parser.add_argument("--video_folder", type=str, default="./data/LLaMA-VID-Finetune")
     parser.add_argument("--image_folder", type=str, default="./data/LLaMA-VID-Finetune")
@@ -93,6 +101,7 @@ def parse_args():
     parser.add_argument("--cache_dir", type=str, default="~/.cache")
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--refine_prompt", type=bool, default=False)
+    parser.add_argument("--input_prompt", type=str, default=None)
     parser.add_argument("--is_multimodal", type=bool, default=True)
     return parser.parse_args()
 
@@ -167,15 +176,24 @@ def initialize_dataset_and_tokenizer():
 def main():
     data_module, token_selection, vision_tower, feat_dir = initialize_dataset_and_tokenizer()
     os.makedirs(feat_dir, exist_ok=True)
-    # Extract features and perform token merging and pruning
-    for instance in tqdm(data_module['train_dataset'], desc='Extracting features and performing token merging and pruning'):
+    total_steps = len(data_module['train_dataset'])
+    print_every = 10
+    progress_bar = tqdm(total=total_steps, desc='Extracting features and performing token merging and pruning')
+    for i, instance in enumerate(data_module['train_dataset']):
         batch = data_module['data_collator'].__call__([instance])
-        image_feature = vision_tower(batch['images'][0])
-        selected_tokens = token_selection.merge_and_prune_tokens(image_feature, batch['prompts'][0][0], batch['input_ids'][0])
+        images = batch['images'][0]
+        if len(images.shape) == 3:
+            images = images.unsqueeze(0)
+        image_feature = vision_tower(images)
+        selected_tokens = token_selection.merge_and_prune_tokens(image_feature, batch['prompts'][0], batch['input_ids'][0])
         # Save the results
         feat_path = os.path.join(feat_dir, f"{instance['index']}.pkl")
         with open(feat_path, 'wb') as f:
             pickle.dump(selected_tokens, f)
-
+        del selected_tokens
+        torch.cuda.empty_cache()
+        if i % print_every == 0:
+            progress_bar.set_postfix({'index': i})
+            progress_bar.update()
 if __name__ == "__main__":
     main()

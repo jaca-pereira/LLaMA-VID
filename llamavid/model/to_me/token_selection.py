@@ -115,7 +115,6 @@ def bipartite_soft_matching(
         b_buckets = b_padded.view(n_buckets, bucket_size, -1)
 
         # Compute dot product similarity within each bucket
-
         scores_padded = torch.full((n_padded, n_padded), -math.inf, device=metric.device)
         for i in range(n_buckets):
             a_normalized = F.normalize(a_buckets[i])

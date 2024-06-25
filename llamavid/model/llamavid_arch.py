@@ -15,6 +15,7 @@
 # Modified from LLaVA (https://github.com/haotian-liu/LLaVA)
 # Copyright 2023 Yanwei Li
 # ------------------------------------------------------------------------
+import pickle
 import time
 from abc import ABC, abstractmethod
 import os
@@ -34,7 +35,7 @@ from llamavid.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PA
 from transformers import CLIPTextModel, CLIPTokenizer
 
 from .to_me.text_token_pruning import text_topk_pruning
-from .to_me.token_selection import kth_bipartite_soft_matching, merge_source, merge_wavg, bipartite_soft_matching
+from .to_me.token_selection import merge_source, merge_wavg, bipartite_soft_matching
 import spacy
 
 
@@ -75,7 +76,7 @@ class LLaMAVIDMetaModel:
         self.config.mm_vision_select_layer = mm_vision_select_layer
         self.config.mm_vision_select_feature = mm_vision_select_feature
         self.config.max_token = max_token
-
+        self.config.pre_computed_features = getattr(model_args, 'pre_computed_features', False)
         if getattr(self, 'mm_projector', None) is None:
             self.mm_projector = build_vision_projector(self.config)
         else:
@@ -104,7 +105,7 @@ class LLaMAVIDMetaModel:
             self.text_tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
             self.nlp = spacy.load("en_core_web_sm")
 
-            def extract_nouns_adjectives_verbs(nlp, text):
+            def extract_nouns_adjectives_verbs(text, nlp):
                 # Process the text
                 doc = nlp(text)
 
@@ -117,10 +118,11 @@ class LLaMAVIDMetaModel:
                     if token.pos_ == 'NOUN':
                         for child in token.children:
                             if child.pos_ == 'ADJ':
-                                nouns_adjectives_verbs.append(f'{child.text} {token.text}')
+                                nouns_adjectives_verbs.append(f'A photo of a {child.text} {token.text}')
+                        nouns_adjectives_verbs.append(f'A photo of a {token.text}')
                     # Check if the token is a verb
                     elif token.pos_ == 'VERB':
-                        nouns_adjectives_verbs.append(token.text)
+                        nouns_adjectives_verbs.append(f'A photo of a {token.text}')
 
                 return nouns_adjectives_verbs
             self.extract_nouns_adjectives_verbs = extract_nouns_adjectives_verbs
@@ -136,78 +138,73 @@ class LLaMAVIDMetaForCausalLM(ABC):
     def get_vision_tower(self):
         return self.get_model().get_vision_tower()
 
-    def encode_images(self, images, prompts=None, long_video=False, input_ids = None):
-        if long_video:
-            # use pre-computed features
-            image_features = images
+
+    def merge_and_prune_tokens(self, image_feature, prompts, input_ids, images=None):
+        num_frames = image_feature.shape[0]
+        if num_frames == 1:
+            kth = 1
         else:
-            image_features = self.get_model().get_vision_tower()(images)
+            kth = 2
+        image_feature = image_feature.reshape(image_feature.shape[0] * image_feature.shape[1], image_feature.shape[2])
+        for ki in range(kth):
+            merge, _ = bipartite_soft_matching(metric=image_feature, r=image_feature.shape[0]//2)
+            image_feature, _ = merge_wavg(merge, image_feature)
 
-        # remove cls embedding
-        if self.config.mm_vision_select_feature == 'patch':
-            if image_features.shape[-2] % 2 == 1:
-                image_features = image_features[..., 1:, :]
+            if self.config.mm_token_source:
+                sources = merge_source(merge, image_feature)[0]
 
-        image_features_list = []
-        if image_features.ndim == 3:
-            image_features = image_features.unsqueeze(0)
-        for i, image_feature in enumerate(image_features):
-            if self.config.mm_redundant_token_selection is not None:
-                num_frames = image_feature.shape[0]
-                if num_frames == 1:
-                    kth = 1
-                else:
-                    kth = 2
-                image_feature = image_feature.reshape(image_feature.shape[0] * image_feature.shape[1], image_feature.shape[2])
-                for ki in range(kth):
-                    image_feature = [image_feature[i: i + (16*256)] if i+(16*256) < len(image_feature) else image_feature[i:] for i in range(0, len(image_feature), (16*256))]
-                    image_feature = [clip.unsqueeze(0) for clip in image_feature]
-                    merges = [bipartite_soft_matching(metric=clip, r=clip.shape[1]//2) for clip in image_feature]
-                    if self.config.mm_token_source:
-                        sources = [merge_source(merge, clip)[0] for merge, clip in zip(merges, image_feature)]
-                    new_image_feature = [merge[0](clip, mode=self.config.mm_redundant_token_selection)[0] for
-                                         merge, clip in zip(merges, image_feature)]
-                    image_feature = torch.cat(new_image_feature, dim=0)
-                if self.config.mm_token_source:
-                    if len(sources) > 1 and sources[-1].shape[-1] != sources[-2].shape[-1]:
-                        sources.pop(-1)
-                        new_image_feature.pop(-1)
-                        image_feature = torch.cat(new_image_feature, dim=0)
-                    sources = torch.cat(sources, dim=0)
-                del new_image_feature
-            if self.config.mm_text_token_pruning:
-                text_inputs = self.get_model().extract_nouns_adjectives_verbs(self.get_model().nlp, prompts[i][0])
-                text_inputs = self.get_model().text_tokenizer(text_inputs, return_tensors="pt", truncation=True, padding=True).to(device=image_feature.device)
+        text_embeds = None
+        for prompt in prompts:
+            text_inputs = self.get_model().extract_nouns_adjectives_verbs(prompt, self.nlp)
+            text_inputs = self.get_model().text_tokenizer(text_inputs, return_tensors="pt", truncation=True, padding=True).to(device=image_feature.device)
+            if text_embeds is None:
                 text_embeds = self.get_model().text_model(**text_inputs).last_hidden_state
                 text_embeds = text_embeds.type(image_feature.dtype)
-                num_non_image_tokens = (input_ids[i] != IMAGE_TOKEN_INDEX).sum()
-                if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
-                    topk = self.config.max_length - num_non_image_tokens - 1
-                else:
-                    topk = self.config.max_length - num_non_image_tokens
+            else:
+                text_embeds_i = self.get_model().text_model(**text_inputs).last_hidden_state
+                text_embeds_i = text_embeds_i.type(image_feature.dtype)
+                text_embeds = torch.cat([text_embeds, text_embeds_i], dim=0)
 
-                if topk > image_feature.shape[0]:
-                    topk = image_feature.shape[0]
+        if self.config.mm_token_source:
+            topk = 50
+            self.get_model().text_token_pruning(image_feature, text_embeds, topk, images, sources)
 
-                if self.config.mm_token_source:
-                    topk = 50
-                    if images.ndim == 4:
-                        image_feature = self.get_model().text_token_pruning(image_feature, text_embeds, topk, images, sources)
-                    else:
-                        image_feature = self.get_model().text_token_pruning(image_feature, text_embeds, topk, images[i], sources)
-                else:
-                    image_feature = self.get_model().text_token_pruning(image_feature, text_embeds, topk)
+        num_non_image_tokens = (input_ids != IMAGE_TOKEN_INDEX).sum()
 
-            image_feature = self.get_model().mm_projector(image_feature)
-            image_features_list.append(image_feature)
+        if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
+            topk = self.config.max_length - num_non_image_tokens - 1
+        else:
+            topk = self.config.max_length - num_non_image_tokens
 
-        return image_features_list
+        if topk > image_feature.shape[0]:
+            topk = image_feature.shape[0]
+        image_feature = self.get_model().text_token_pruning(image_feature, text_embeds, topk)
+        return image_feature
+
+    def encode_images(self, images, prompts, indexes = None, input_ids = None, pre_computed_features=False):
+        if pre_computed_features:
+            # use pre-computed features
+            image_features = images
+            image_features = self.get_model().mm_projector(image_features)
+            return [image_features]
+        else:
+            image_features = self.get_model().get_vision_tower()(images)
+            if self.config.mm_vision_select_feature == 'patch':
+                if image_features.shape[-2] % 2 == 1:
+                    image_features = image_features[..., 1:, :]
+            new_image_features = []
+            for image_feature, index, input_id in zip(image_features, indexes, input_ids):
+                image_feature = self.merge_and_prune_tokens(image_feature.cpu(), prompts.cpu(), input_id.cpu())
+                new_image_features.append(image_feature.to(device=images.device))
+                with open(index, 'wb') as f:
+                    pickle.dump(image_feature, f)
+            return new_image_features
 
     def update_prompt(self, prompts=None):
         self.prompts = prompts
 
     def prepare_inputs_labels_for_multimodal(
-            self, input_ids, attention_mask, past_key_values, labels, images, prompts=None
+            self, input_ids, attention_mask, past_key_values, labels, images, prompts=None, indexes = None
     ):
         if prompts is None and hasattr(self, 'prompts'):
             prompts = self.prompts
@@ -220,20 +217,12 @@ class LLaMAVIDMetaForCausalLM(ABC):
                                             dtype=attention_mask.dtype, device=attention_mask.device)
             return input_ids, attention_mask, past_key_values, None, labels
 
-        # pre-process images for long video
-        if images[0].shape[-1] > 1000:
-            long_video = True
-        else:
-            long_video = False
-
         if type(images) is list or images.ndim == 5:
-            # not reseshape for long video
-            if not long_video:
-                images = [image if len(image.shape) == 4 else image.unsqueeze(0) for image in images]
+            images = [image if len(image.shape) == 4 else image.unsqueeze(0) for image in images]
             concat_images = torch.cat(images, dim=0)
-            image_features = self.encode_images(concat_images, prompts, long_video=long_video, input_ids = input_ids)
+            image_features = self.encode_images(concat_images, prompts, indexes=indexes, input_ids = input_ids)
         else:
-            image_features = self.encode_images(images, prompts, long_video=long_video, input_ids = input_ids)
+            image_features = self.encode_images(images, prompts, indexes=indexes, input_ids = input_ids)
 
         num_inps = len(image_features)
         new_input_embeds = []
@@ -267,7 +256,7 @@ class LLaMAVIDMetaForCausalLM(ABC):
                 cur_new_labels = []
                 assert cur_labels.shape == cur_input_ids.shape
 
-            if not long_video:
+            if not pre_computed_features:
                 while image_token_indices.numel() > 0:
                     if isinstance(image_features, list):
                         cur_image_features = image_features[cur_image_idx]

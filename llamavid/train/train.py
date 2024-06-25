@@ -868,6 +868,7 @@ class LazySupervisedDataset(Dataset):
                 if 'image' in sources[0]:
                     image_file = self.list_data_dict[i]['image']
                     image_folder = self.data_args.image_folder
+                    index_folder = image_folder
                     processor = self.data_args.image_processor
 
                     # convert image type for OCR VQA dataset
@@ -906,6 +907,7 @@ class LazySupervisedDataset(Dataset):
                 elif 'video' in sources[0]:
                     video_file = self.list_data_dict[i]['video']
                     video_folder = self.data_args.video_folder
+                    index_folder = video_folder
                     video_file = os.path.join(video_folder, video_file)
                     suffix = video_file.split('.')[-1]
                     if not os.path.exists(video_file):
@@ -984,7 +986,7 @@ class LazySupervisedDataset(Dataset):
         if prompt is not None:
             data_dict['prompt'] = prompt
 
-        data_dict['index'] = i
+        data_dict['index'] = os.join(index_folder, i, '.pkl')
 
         return data_dict
 
@@ -996,8 +998,8 @@ class DataCollatorForSupervisedDataset(object):
     tokenizer: transformers.PreTrainedTokenizer
 
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
-        input_ids, labels = tuple([instance[key] for instance in instances]
-                                  for key in ("input_ids", "labels"))
+        input_ids, labels, indexes = tuple([instance[key] for instance in instances]
+                                  for key in ("input_ids", "labels", "index"))
         input_ids = torch.nn.utils.rnn.pad_sequence(
             input_ids,
             batch_first=True,
@@ -1011,6 +1013,7 @@ class DataCollatorForSupervisedDataset(object):
             input_ids=input_ids,
             labels=labels,
             attention_mask=input_ids.ne(self.tokenizer.pad_token_id),
+            indexes=indexes,
         )
 
         if 'image' in instances[0]:
@@ -1122,6 +1125,7 @@ def train():
             target_modules=find_all_linear_names(model),
             lora_dropout=training_args.lora_dropout,
             bias=training_args.lora_bias,
+            use_rslora=True,
             task_type="CAUSAL_LM",
         )
         if training_args.bits == 16:
