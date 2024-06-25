@@ -868,7 +868,6 @@ class LazySupervisedDataset(Dataset):
                 if 'image' in sources[0]:
                     image_file = self.list_data_dict[i]['image']
                     image_folder = self.data_args.image_folder
-                    index_folder = image_folder
                     processor = self.data_args.image_processor
 
                     # convert image type for OCR VQA dataset
@@ -907,7 +906,6 @@ class LazySupervisedDataset(Dataset):
                 elif 'video' in sources[0]:
                     video_file = self.list_data_dict[i]['video']
                     video_folder = self.data_args.video_folder
-                    index_folder = video_folder
                     video_file = os.path.join(video_folder, video_file)
                     suffix = video_file.split('.')[-1]
                     if not os.path.exists(video_file):
@@ -986,7 +984,10 @@ class LazySupervisedDataset(Dataset):
         if prompt is not None:
             data_dict['prompt'] = prompt
 
-        data_dict['index'] = os.join(index_folder, i, '.pkl')
+        index_folder = self.data_args.image_folder if 'image' in self.list_data_dict[i] else self.data_args.video_folder
+        index_folder = os.join(index_folder, 'features')
+        os.makedirs(index_folder, exist_ok=True)
+        data_dict['index'] = os.join(index_folder, 'features', str(i), '.pkl')
 
         return data_dict
 
