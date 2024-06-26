@@ -58,6 +58,7 @@ class LlavaLlamaAttForCausalLM(LlamaForCausalLM, LLaMAVIDMetaForCausalLM):
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
+        indexes: Optional[List[str]] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
@@ -77,7 +78,7 @@ class LlavaLlamaAttForCausalLM(LlamaForCausalLM, LLaMAVIDMetaForCausalLM):
             if input_ids.device != self.device:
                 input_ids = input_ids.to(device=self.device)
 
-        input_ids, attention_mask, past_key_values, inputs_embeds, labels = self.prepare_inputs_labels_for_multimodal(input_ids, attention_mask, past_key_values, labels, images, prompts=prompts)
+        input_ids, attention_mask, past_key_values, inputs_embeds, labels = self.prepare_inputs_labels_for_multimodal(input_ids, attention_mask, past_key_values, labels, images, prompts=prompts, indexes=indexes)
 
         torch.cuda.empty_cache()
 

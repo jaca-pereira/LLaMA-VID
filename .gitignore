@@ -47,3 +47,5 @@ logs
 run
 wandb
 ./~
+
+*.pkl

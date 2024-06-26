@@ -95,34 +95,35 @@ def bipartite_soft_matching(
         return do_nothing, do_nothing
 
     with torch.no_grad():
-        metric = metric / metric.norm(dim=-1, keepdim=True)
+        metric.div_(metric.norm(dim=-1, keepdim=True))
+
         a, b = metric[..., ::2, :], metric[..., 1::2, :]
 
-        # apply penalty to tokens from different clips
-
+        # Get the number of items in `a` and `b`
         n = a.shape[0]
-        padding_size = (bucket_size - (n % bucket_size)) % bucket_size
+        padding_size = (bucket_size - (n % bucket_size)) % bucket_size  # Ensure padding_size is within [0, bucket_size)
 
-        # padd a and b to be divisible by bucket_size
-        a_padded = F.pad(a, (0, 0, 0, padding_size))
-        b_padded = F.pad(b, (0, 0, 0, padding_size))
+        # Pad `a` and `b` to be divisible by `bucket_size`
+        if padding_size > 0:
+            a = F.pad(a, (0, 0, 0, padding_size), 'constant', 0)
+            b = F.pad(b, (0, 0, 0, padding_size), 'constant', 0)
 
-        n_padded = a_padded.shape[0]
+        n_padded = a.shape[0]
         n_buckets = n_padded // bucket_size
 
-        # Reshape a_padded and b_padded into (n_buckets, bucket_size, d)
-        a_buckets = a_padded.view(n_buckets, bucket_size, -1)
-        b_buckets = b_padded.view(n_buckets, bucket_size, -1)
+        # Reshape `a` and `b` into (n_buckets, bucket_size, d)
+        a = a.view(n_buckets, bucket_size, -1)
+        b = b.view(n_buckets, bucket_size, -1)
+
+        # Initialize the scores tensor with -inf
+        scores = torch.full((n_padded, n_padded), -math.inf, device=metric.device)
 
         # Compute dot product similarity within each bucket
-        scores_padded = torch.full((n_padded, n_padded), -math.inf, device=metric.device)
         for i in range(n_buckets):
-            a_normalized = F.normalize(a_buckets[i])
-            b_normalized = F.normalize(b_buckets[i].transpose(1, 0))
-            scores_padded[i * bucket_size:(i + 1) * bucket_size, i * bucket_size:(i + 1) * bucket_size] = a_normalized @ b_normalized
+            scores[i * bucket_size:(i + 1) * bucket_size, i * bucket_size:(i + 1) * bucket_size] = a[i] @ b[i].transpose(1, 0)
 
         # Trim the padding
-        scores = scores_padded[:n, :n]
+        scores = scores[:n, :n]
 
         node_max, node_idx = scores.max(dim=-1)
         edge_idx = node_max.argsort(dim=-1, descending=True)[..., None]

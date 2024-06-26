@@ -119,6 +119,7 @@ def run_inference(args):
         else:
             qs = DEFAULT_IMAGE_TOKEN + '\n' + qs
 
+
         conv = conv_templates[args.conv_mode].copy()
         conv.append_message(conv.roles[0], qs)
         conv.append_message(conv.roles[1], None)
@@ -133,6 +134,8 @@ def run_inference(args):
         cur_prompt = question
         with torch.inference_mode():
             model.update_prompt([[cur_prompt]])
+            #input_ids = input_ids.repeat(2, 1)
+            #video.append(video[0])
             output_ids = model.generate(
                 input_ids,
                 images=video,

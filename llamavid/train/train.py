@@ -985,9 +985,10 @@ class LazySupervisedDataset(Dataset):
             data_dict['prompt'] = prompt
 
         index_folder = self.data_args.image_folder if 'image' in self.list_data_dict[i] else self.data_args.video_folder
-        index_folder = os.join(index_folder, 'features')
+        index_folder = os.path.join(index_folder, 'features')
         os.makedirs(index_folder, exist_ok=True)
-        data_dict['index'] = os.join(index_folder, 'features', str(i), '.pkl')
+        index_folder = os.path.join(index_folder, str(i))
+        data_dict['index'] = index_folder + '.pkl'
 
         return data_dict
 
@@ -1126,7 +1127,6 @@ def train():
             target_modules=find_all_linear_names(model),
             lora_dropout=training_args.lora_dropout,
             bias=training_args.lora_bias,
-            use_rslora=True,
             task_type="CAUSAL_LM",
         )
         if training_args.bits == 16:

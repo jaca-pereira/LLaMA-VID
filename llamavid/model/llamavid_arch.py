@@ -15,6 +15,7 @@
 # Modified from LLaVA (https://github.com/haotian-liu/LLaVA)
 # Copyright 2023 Yanwei Li
 # ------------------------------------------------------------------------
+import math
 import pickle
 import time
 from abc import ABC, abstractmethod
@@ -76,7 +77,6 @@ class LLaMAVIDMetaModel:
         self.config.mm_vision_select_layer = mm_vision_select_layer
         self.config.mm_vision_select_feature = mm_vision_select_feature
         self.config.max_token = max_token
-        self.config.pre_computed_features = getattr(model_args, 'pre_computed_features', False)
         if getattr(self, 'mm_projector', None) is None:
             self.mm_projector = build_vision_projector(self.config)
         else:
@@ -100,14 +100,14 @@ class LLaMAVIDMetaModel:
             self.text_model = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14")
             self.text_model.eval()
             self.text_model.requires_grad_(False)
-            self.text_model.to(self.vision_tower.device)
+            self.text_model = self.text_model.to(self.device)
             self.text_token_pruning = text_topk_pruning
             self.text_tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
             self.nlp = spacy.load("en_core_web_sm")
 
-            def extract_nouns_adjectives_verbs(text, nlp):
+            def extract_nouns_adjectives_verbs(text):
                 # Process the text
-                doc = nlp(text)
+                doc = self.nlp(text)
 
                 # Initialize lists to store nouns, adjectives, and verbs
                 nouns_adjectives_verbs = []
@@ -138,32 +138,65 @@ class LLaMAVIDMetaForCausalLM(ABC):
     def get_vision_tower(self):
         return self.get_model().get_vision_tower()
 
+    def merge_tokens(self, image_features):
+        num_frames = image_features.shape[0]
+        base_size = num_frames * 32
+        bucket_size = 2 ** math.floor(math.log2(base_size))
+        if bucket_size <= 512:
+            reduction_ratio = 1
+        elif bucket_size <= 2048:
+            reduction_ratio = 2
+        elif bucket_size <= 4096:
+            reduction_ratio = 3
+        else:
+            reduction_ratio = 4
+        image_features = image_features.reshape(image_features.shape[0] * image_features.shape[1], image_features.shape[2])
+        for kt in range(reduction_ratio):
+            merge, _ = bipartite_soft_matching(metric=image_features, r=image_features.shape[0]//reduction_ratio, bucket_size=bucket_size)
+            image_features, _ = merge_wavg(merge, image_features)
+        return image_features
+
+    def prune_tokens(self, image_features, prompt, input_ids):
+        normalized_image_features = F.normalize(image_features)
+        text_inputs = self.get_model().text_tokenizer(self.get_model().extract_nouns_adjectives_verbs(prompt[0]), return_tensors="pt", truncation=True, padding=True).to(image_features.device)
+        text_embeds = self.get_model().text_model(**text_inputs).last_hidden_state
+        text_embeds = text_embeds.type(image_features.dtype)
+        topk = self.config.max_length - (input_ids != IMAGE_TOKEN_INDEX).sum()
+        if topk > image_features.shape[0]:
+            topk = image_features.shape[0]
+        text_embeds = F.normalize(text_embeds)
+        return self.get_model().text_token_pruning(image_features, normalized_image_features, text_embeds, topk)
 
     def merge_and_prune_tokens(self, image_feature, prompts, input_ids, images=None):
+
         num_frames = image_feature.shape[0]
-        if num_frames == 1:
-            kth = 1
+        base_size = num_frames * 32
+        bucket_size = 2 ** math.floor(math.log2(base_size))
+        if bucket_size <= 512:
+            reduction_ratio = 1
+        elif bucket_size <= 2048:
+            reduction_ratio = 2
+        elif bucket_size <= 4096:
+            reduction_ratio = 3
         else:
-            kth = 2
+            reduction_ratio = 4
         image_feature = image_feature.reshape(image_feature.shape[0] * image_feature.shape[1], image_feature.shape[2])
-        for ki in range(kth):
-            merge, _ = bipartite_soft_matching(metric=image_feature, r=image_feature.shape[0]//2)
+        for kt in range(reduction_ratio):
+            merge, _ = bipartite_soft_matching(metric=image_feature, r=image_feature.shape[0]//reduction_ratio, bucket_size=bucket_size)
             image_feature, _ = merge_wavg(merge, image_feature)
 
-            if self.config.mm_token_source:
-                sources = merge_source(merge, image_feature)[0]
+        if self.config.mm_token_source:
+            sources = merge_source(merge, image_feature)[0]
 
-        text_embeds = None
+        text_inputs = None
         for prompt in prompts:
-            text_inputs = self.get_model().extract_nouns_adjectives_verbs(prompt, self.nlp)
-            text_inputs = self.get_model().text_tokenizer(text_inputs, return_tensors="pt", truncation=True, padding=True).to(device=image_feature.device)
-            if text_embeds is None:
-                text_embeds = self.get_model().text_model(**text_inputs).last_hidden_state
-                text_embeds = text_embeds.type(image_feature.dtype)
+            if text_inputs is None:
+                text_inputs = self.get_model().text_tokenizer(self.get_model().extract_nouns_adjectives_verbs(prompt), return_tensors="pt", truncation=True, padding=True).to(image_feature.device)
             else:
-                text_embeds_i = self.get_model().text_model(**text_inputs).last_hidden_state
-                text_embeds_i = text_embeds_i.type(image_feature.dtype)
-                text_embeds = torch.cat([text_embeds, text_embeds_i], dim=0)
+                text_inputs_i = self.get_model().text_tokenizer(self.get_model().extract_nouns_adjectives_verbs(prompt), return_tensors="pt", truncation=True, padding=True).to(image_feature.device)
+                text_inputs = torch.cat([text_inputs, text_inputs_i], dim=0)
+        text_embeds = self.get_model().text_model(**text_inputs).last_hidden_state
+        text_embeds = text_embeds.type(image_feature.dtype)
 
         if self.config.mm_token_source:
             topk = 50
@@ -180,25 +213,6 @@ class LLaMAVIDMetaForCausalLM(ABC):
             topk = image_feature.shape[0]
         image_feature = self.get_model().text_token_pruning(image_feature, text_embeds, topk)
         return image_feature
-
-    def encode_images(self, images, prompts, indexes = None, input_ids = None, pre_computed_features=False):
-        if pre_computed_features:
-            # use pre-computed features
-            image_features = images
-            image_features = self.get_model().mm_projector(image_features)
-            return [image_features]
-        else:
-            image_features = self.get_model().get_vision_tower()(images)
-            if self.config.mm_vision_select_feature == 'patch':
-                if image_features.shape[-2] % 2 == 1:
-                    image_features = image_features[..., 1:, :]
-            new_image_features = []
-            for image_feature, index, input_id in zip(image_features, indexes, input_ids):
-                image_feature = self.merge_and_prune_tokens(image_feature.cpu(), prompts.cpu(), input_id.cpu())
-                new_image_features.append(image_feature.to(device=images.device))
-                with open(index, 'wb') as f:
-                    pickle.dump(image_feature, f)
-            return new_image_features
 
     def update_prompt(self, prompts=None):
         self.prompts = prompts
@@ -219,12 +233,20 @@ class LLaMAVIDMetaForCausalLM(ABC):
 
         if type(images) is list or images.ndim == 5:
             images = [image if len(image.shape) == 4 else image.unsqueeze(0) for image in images]
+            image_counts = [image.shape[0] for image in images]
             concat_images = torch.cat(images, dim=0)
-            image_features = self.encode_images(concat_images, prompts, indexes=indexes, input_ids = input_ids)
+            image_features = self.get_model().get_vision_tower()(concat_images)
         else:
-            image_features = self.encode_images(images, prompts, indexes=indexes, input_ids = input_ids)
+            image_counts = None
+            image_features = self.get_model().get_vision_tower()(images)
 
-        num_inps = len(image_features)
+        if self.config.mm_vision_select_feature == 'patch':
+            if image_features.shape[-2] % 2 == 1:
+                image_features = image_features[..., 1:, :]
+
+        if image_counts is not None:
+            image_features = list(image_features.split(image_counts))
+        num_inps = len(image_features) #batch size
         new_input_embeds = []
         new_labels = [] if labels is not None else None
         cur_image_idx = 0
@@ -233,10 +255,8 @@ class LLaMAVIDMetaForCausalLM(ABC):
                 # multimodal LLM, but the current sample is not multimodal
                 # FIXME: this is a hacky fix, for deepspeed zero3 to work
                 half_len = cur_input_ids.shape[0] // 2
-                if isinstance(image_features, list):
-                    cur_image_features = image_features[cur_image_idx][0]
-                else:
-                    cur_image_features = image_features[cur_image_idx]
+
+                cur_image_features = image_features[cur_image_idx]
                 cur_input_embeds_1 = self.get_model().embed_tokens(cur_input_ids[:half_len])
                 cur_input_embeds_2 = self.get_model().embed_tokens(cur_input_ids[half_len:])
                 cur_input_embeds = torch.cat([cur_input_embeds_1, cur_image_features[0:0], cur_input_embeds_2], dim=0)
@@ -249,6 +269,13 @@ class LLaMAVIDMetaForCausalLM(ABC):
 
                 continue
 
+            cur_image_features = image_features[cur_image_idx]
+            cur_image_features = self.merge_tokens(cur_image_features)
+            cur_image_features = self.prune_tokens(cur_image_features, prompts[batch_idx], cur_input_ids)
+            with open(indexes[batch_idx], 'wb') as f:
+                pickle.dump(cur_image_features, f)
+            cur_image_features = self.get_model().mm_projector(cur_image_features)
+
             image_token_indices = torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0]
             cur_new_input_embeds = []
             if labels is not None:
@@ -256,84 +283,62 @@ class LLaMAVIDMetaForCausalLM(ABC):
                 cur_new_labels = []
                 assert cur_labels.shape == cur_input_ids.shape
 
-            if not pre_computed_features:
-                while image_token_indices.numel() > 0:
-                    if isinstance(image_features, list):
-                        cur_image_features = image_features[cur_image_idx]
-                    else:
-                        cur_image_features = image_features
-                    image_token_start = image_token_indices[0]
+            while image_token_indices.numel() > 0:
 
-                    if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config,
-                                                                                      'mm_use_im_start_end', False):
-                        cur_new_input_embeds.append(
-                            self.get_model().embed_tokens(cur_input_ids[:image_token_start - 1]).detach())
-                        cur_new_input_embeds.append(
-                            self.get_model().embed_tokens(cur_input_ids[image_token_start - 1:image_token_start]))
-                        cur_new_input_embeds.append(cur_image_features)
-                        cur_new_input_embeds.append(
-                            self.get_model().embed_tokens(cur_input_ids[image_token_start + 1:image_token_start + 2]))
-                        if labels is not None:
-                            cur_new_labels.append(cur_labels[:image_token_start])
-                            cur_new_labels.append(
-                                torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=labels.device,
-                                           dtype=labels.dtype))
-                            cur_new_labels.append(cur_labels[image_token_start:image_token_start + 1])
-                            cur_labels = cur_labels[image_token_start + 2:]
-                    else:
-                        cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids[:image_token_start]))
-                        cur_new_input_embeds.append(cur_image_features)
-                        if labels is not None:
-                            cur_new_labels.append(cur_labels[:image_token_start])
-                            cur_new_labels.append(
-                                torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=labels.device,
-                                           dtype=labels.dtype))
-                            cur_labels = cur_labels[image_token_start + 1:]
-                    if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config,
-                                                                                      'mm_use_im_start_end', False):
-                        cur_input_ids = cur_input_ids[image_token_start + 2:]
-                    else:
-                        cur_input_ids = cur_input_ids[image_token_start + 1:]
-                    image_token_indices = torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0]
+                image_token_start = image_token_indices[0]
 
-                # changle image idx after processing one sample
-                if cur_image_idx + 1 < num_inps:
-                    cur_image_idx += 1
-                if cur_input_ids.numel() > 0:
-                    if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config,
-                                                                                      'mm_use_im_start_end', False):
-                        cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids).detach())
-                    else:
-                        cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids))
+
+                if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config,
+                                                                                  'mm_use_im_start_end', False):
+                    cur_new_input_embeds.append(
+                        self.get_model().embed_tokens(cur_input_ids[:image_token_start - 1]).detach())
+                    cur_new_input_embeds.append(
+                        self.get_model().embed_tokens(cur_input_ids[image_token_start - 1:image_token_start]))
+                    cur_new_input_embeds.append(cur_image_features)
+                    cur_new_input_embeds.append(
+                        self.get_model().embed_tokens(cur_input_ids[image_token_start + 1:image_token_start + 2]))
                     if labels is not None:
-                        cur_new_labels.append(cur_labels)
-
-                cur_new_input_embeds = [x.to(device=self.device) for x in cur_new_input_embeds]
-                cur_new_input_embeds = torch.cat(cur_new_input_embeds, dim=0)
-                new_input_embeds.append(cur_new_input_embeds)
-                if labels is not None:
-                    cur_new_labels = torch.cat(cur_new_labels, dim=0)
-                    new_labels.append(cur_new_labels)
-            else:
-                cur_new_input_embeds = torch.Tensor(len(cur_input_ids), self.config.hidden_size).to(dtype=self.dtype,
-                                                                                                    device=self.device)
-                text_token_indices = torch.where(cur_input_ids != IMAGE_TOKEN_INDEX)[0]
-                if not self.training and self.get_model().embed_tokens.weight.device != cur_input_ids.device:
-                    model_device = self.get_model().embed_tokens.weight.device
-                    data_device = cur_input_ids.device
-                    cur_input_ids_text = cur_input_ids[text_token_indices].to(device=model_device)
-                    cur_new_input_embeds[text_token_indices] = self.get_model().embed_tokens(cur_input_ids_text).to(
-                        device=data_device)
+                        cur_new_labels.append(cur_labels[:image_token_start])
+                        cur_new_labels.append(
+                            torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=labels.device,
+                                       dtype=labels.dtype))
+                        cur_new_labels.append(cur_labels[image_token_start:image_token_start + 1])
+                        cur_labels = cur_labels[image_token_start + 2:]
                 else:
-                    cur_new_input_embeds[text_token_indices] = self.get_model().embed_tokens(
-                        cur_input_ids[text_token_indices])
-                cur_image_features = image_features[cur_image_idx]
-                cur_new_input_embeds[image_token_indices] = cur_image_features
-                new_input_embeds.append(cur_new_input_embeds)
+                    cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids[:image_token_start]))
+                    cur_new_input_embeds.append(cur_image_features)
+                    if labels is not None:
+                        cur_new_labels.append(cur_labels[:image_token_start])
+                        cur_new_labels.append(
+                            torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=labels.device,
+                                       dtype=labels.dtype))
+                        cur_labels = cur_labels[image_token_start + 1:]
+                if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config,
+                                                                                  'mm_use_im_start_end', False):
+                    cur_input_ids = cur_input_ids[image_token_start + 2:]
+                else:
+                    cur_input_ids = cur_input_ids[image_token_start + 1:]
+                image_token_indices = torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0]
+
+            # changle image idx after processing one sample
+            if cur_image_idx + 1 < num_inps:
+                cur_image_idx += 1
+            if cur_input_ids.numel() > 0:
+                if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config,
+                                                                                  'mm_use_im_start_end', False):
+                    cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids).detach())
+                else:
+                    cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids))
                 if labels is not None:
-                    new_labels.append(cur_labels)
-                if cur_image_idx + 1 < num_inps:
-                    cur_image_idx += 1
+                    cur_new_labels.append(cur_labels)
+
+            cur_new_input_embeds = [x.to(device=self.device) for x in cur_new_input_embeds]
+            cur_new_input_embeds = torch.cat(cur_new_input_embeds, dim=0)
+            new_input_embeds.append(cur_new_input_embeds)
+            if labels is not None:
+                cur_new_labels = torch.cat(cur_new_labels, dim=0)
+                new_labels.append(cur_new_labels)
+
 
         if any(x.shape != new_input_embeds[0].shape for x in new_input_embeds):
             max_len = max(x.shape[0] for x in new_input_embeds)

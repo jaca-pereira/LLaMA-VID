@@ -50,21 +50,19 @@ def plot_top_k_tokens(source_top_k_tokens: torch.Tensor, video: torch.Tensor):
     exit(1)
 
 
-def text_topk_pruning(video_tokens: torch.Tensor, text_tokens: torch.Tensor, k: int, video: torch.Tensor=None, source: torch.Tensor=None):
+def text_topk_pruning(video_tokens: torch.Tensor, normalized_video_tokens: torch.Tensor, normalized_text_tokens: torch.Tensor, k: int, video: torch.Tensor=None, source: torch.Tensor=None):
     """
     Returns the top_k video tokens that have the highest average cosine similarity with the text tokens.
     """
 
-    sim = F.pad(F.normalize(text_tokens), (0, video_tokens.shape[-1] - text_tokens.shape[-1])) @ F.normalize(video_tokens).t()
+    sim = F.pad(normalized_text_tokens, (0, min(normalized_video_tokens.shape[-1] - normalized_text_tokens.shape[-1], normalized_text_tokens.shape[-1]))) @ normalized_video_tokens.t()
 
     sim = sim.sum(1).sum(0)
 
     _, top_k_idx = torch.topk(sim, k, dim=-1)
 
-    top_k_tokens = video_tokens[top_k_idx]
-
     if source is not None:
         source_top_k_tokens = source[top_k_idx]
         plot_top_k_tokens(source_top_k_tokens, video)
 
-    return top_k_tokens
+    return video_tokens[top_k_idx]

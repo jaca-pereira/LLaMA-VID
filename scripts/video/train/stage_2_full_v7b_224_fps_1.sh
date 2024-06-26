@@ -30,9 +30,9 @@ deepspeed llamavid/train/train_mem.py \
     --bf16 True \
     --output_dir ./work_dirs/llama-vid-clip-text-token-reduction-7b-full-224-video-fps-1  \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 1 \
-    --per_device_eval_batch_size 1 \
-    --gradient_accumulation_steps 16 \
+    --per_device_train_batch_size 2 \
+    --per_device_eval_batch_size 2 \
+    --gradient_accumulation_steps 8 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
     --save_steps 500 \
@@ -43,9 +43,13 @@ deepspeed llamavid/train/train_mem.py \
     --lr_scheduler_type "cosine" \
     --logging_steps 1 \
     --tf32 True \
-    --model_max_length 4096 \
+    --model_max_length 8192 \
     --gradient_checkpointing True \
     --dataloader_num_workers 4 \
     --lazy_preprocess True \
+    --lora_enable True \
+    --lora_r 64 \
+    --lora_alpha 8 \
+    --lora_dropout 0.05 \
+    --lora_bias "none" \
     --report_to wandb
-

@@ -7,13 +7,14 @@ conda activate llamavid
 echo $CONDA_DEFAULT_ENV
 
 cd ~/data/LLaMA-VID
+
 wandb login a5569ff69ae6ef0b1d94c04c83e390de9c453efd
 
 deepspeed --module llamavid.train.train_mem \
     --deepspeed ./scripts/zero2.json \
     --model_name_or_path model_zoo/LLM/vicuna/7B-V1.5 \
     --version plain_guided \
-    --data_path ./data/LLaMA-VID-Pretrain/subsample_llava_with_webvid.json \
+    --data_path ./data/LLaMA-VID-Pretrain/llava_with_webvid.json \
     --image_folder ./data/LLaMA-VID-Pretrain/ \
     --video_folder ./data/LLaMA-VID-Pretrain/ \
     --vision_tower ./model_zoo/LAVIS/eva_vit_g.pth \
@@ -25,11 +26,11 @@ deepspeed --module llamavid.train.train_mem \
     --mm_use_im_patch_token False \
     --video_fps 1 \
     --bf16 True \
-    --output_dir ./work_dirs/llama-vid-token-reduction-7b-pretrain-224-video-fps-1 \
+    --output_dir ./work_dirs/llama-vid-clip-text-token-reduction-7b-pretrain-224-video-fps-1 \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 32 \
-    --per_device_eval_batch_size 32 \
-    --gradient_accumulation_steps 1 \
+    --per_device_train_batch_size 16 \
+    --per_device_eval_batch_size 16 \
+    --gradient_accumulation_steps 2 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
     --save_steps 500 \
@@ -44,4 +45,5 @@ deepspeed --module llamavid.train.train_mem \
     --gradient_checkpointing True \
     --dataloader_num_workers 4 \
     --lazy_preprocess True \
+    --freeze_backbone True \
     --report_to wandb

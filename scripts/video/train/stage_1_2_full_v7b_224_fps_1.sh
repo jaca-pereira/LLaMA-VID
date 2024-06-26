@@ -28,9 +28,9 @@ deepspeed --module llamavid.train.train_mem \
     --bf16 True \
     --output_dir ./work_dirs/llama-vid-clip-text-token-reduction-7b-pretrain-224-video-fps-1 \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 32 \
-    --per_device_eval_batch_size 32 \
-    --gradient_accumulation_steps 1 \
+    --per_device_train_batch_size 16 \
+    --per_device_eval_batch_size 16 \
+    --gradient_accumulation_steps 2 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
     --save_steps 500 \
@@ -41,16 +41,13 @@ deepspeed --module llamavid.train.train_mem \
     --lr_scheduler_type "cosine" \
     --logging_steps 1 \
     --tf32 True \
-    --model_max_length 4098 \
+    --model_max_length 2048 \
     --gradient_checkpointing True \
     --dataloader_num_workers 4 \
     --lazy_preprocess True \
-    --lora_enable True \
-    --lora_r 128 \
-    --lora_alpha 16 \
-    --lora_dropout 0.05 \
-    --lora_bias "none" \
+    --freeze_backbone True \
     --report_to wandb
+
 
 deepspeed llamavid/train/train_mem.py \
     --deepspeed ./scripts/zero2_offload.json \
@@ -72,9 +69,9 @@ deepspeed llamavid/train/train_mem.py \
     --bf16 True \
     --output_dir ./work_dirs/llama-vid-clip-text-token-reduction-7b-full-224-video-fps-1  \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 4 \
-    --per_device_eval_batch_size 4 \
-    --gradient_accumulation_steps 4 \
+    --per_device_train_batch_size 2 \
+    --per_device_eval_batch_size 2 \
+    --gradient_accumulation_steps 8 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
     --save_steps 500 \
@@ -90,8 +87,8 @@ deepspeed llamavid/train/train_mem.py \
     --dataloader_num_workers 4 \
     --lazy_preprocess True \
     --lora_enable True \
-    --lora_r 128 \
-    --lora_alpha 16 \
+    --lora_r 64 \
+    --lora_alpha 8 \
     --lora_dropout 0.05 \
     --lora_bias "none" \
     --report_to wandb
