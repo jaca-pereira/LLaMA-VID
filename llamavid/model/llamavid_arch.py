@@ -141,19 +141,15 @@ class LLaMAVIDMetaForCausalLM(ABC):
     def merge_tokens(self, image_features):
         num_frames = image_features.shape[0]
         base_size = num_frames * 32
-        bucket_size = 2 ** math.floor(math.log2(base_size))
-        if bucket_size <= 512:
-            reduction_ratio = 1
-        elif bucket_size <= 2048:
-            reduction_ratio = 2
-        elif bucket_size <= 4096:
-            reduction_ratio = 3
-        else:
-            reduction_ratio = 4
+        bucket_size = 2 ** math.floor(math.log2(base_size)) #nearest power of 2
+        reduction_ratio = max(0, math.floor(math.log2(bucket_size / 512)))
         image_features = image_features.reshape(image_features.shape[0] * image_features.shape[1], image_features.shape[2])
         for kt in range(reduction_ratio):
-            merge, _ = bipartite_soft_matching(metric=image_features, r=image_features.shape[0]//reduction_ratio, bucket_size=bucket_size)
+            merge = bipartite_soft_matching(metric=image_features, bucket_size=bucket_size)
             image_features, _ = merge_wavg(merge, image_features)
+            if kt < reduction_ratio - 1:
+                base_size = image_features.shape[0]//256 * 32
+                bucket_size = 2 ** math.floor(math.log2(base_size))
         return image_features
 
     def prune_tokens(self, image_features, prompt, input_ids):
@@ -237,8 +233,10 @@ class LLaMAVIDMetaForCausalLM(ABC):
             concat_images = torch.cat(images, dim=0)
             image_features = self.get_model().get_vision_tower()(concat_images)
         else:
-            image_counts = None
-            image_features = self.get_model().get_vision_tower()(images)
+            images = [image.unsqueeze(0) for image in images]
+            image_counts = [image.shape[0] for image in images]
+            concat_images = torch.cat(images, dim=0)
+            image_features = self.get_model().get_vision_tower()(concat_images)
 
         if self.config.mm_vision_select_feature == 'patch':
             if image_features.shape[-2] % 2 == 1:

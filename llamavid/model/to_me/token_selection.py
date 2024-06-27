@@ -75,30 +75,21 @@ def kth_bipartite_soft_matching(
 
 def bipartite_soft_matching(
     metric: torch.Tensor,
-    r: int,
     bucket_size: int = 4096
 ) -> Tuple[Callable, Callable]:
     """
     Applies ToMe with a balanced matching set (50%, 50%).
 
     Input size is [batch, tokens, channels].
-    r indicates the number of tokens to remove (max 50% of tokens).
     bucket_size indicates the size of the bucket for the bipartite matching.
 
     """
 
-    # We can only reduce by a maximum of 50% tokens
-    t = metric.shape[0]
-    r = min(r, t // 2)
-
-    if r <= 0:
-        return do_nothing, do_nothing
 
     with torch.no_grad():
         metric.div_(metric.norm(dim=-1, keepdim=True))
 
         a, b = metric[..., ::2, :], metric[..., 1::2, :]
-
         # Get the number of items in `a` and `b`
         n = a.shape[0]
         padding_size = (bucket_size - (n % bucket_size)) % bucket_size  # Ensure padding_size is within [0, bucket_size)
@@ -115,47 +106,45 @@ def bipartite_soft_matching(
         a = a.view(n_buckets, bucket_size, -1)
         b = b.view(n_buckets, bucket_size, -1)
 
-        # Initialize the scores tensor with -inf
-        scores = torch.full((n_padded, n_padded), -math.inf, device=metric.device)
+        batch_size = min(2**15, n_padded) # Avoid CUDA OOM
+        num_batches = math.ceil(n_padded / batch_size)
 
-        # Compute dot product similarity within each bucket
-        for i in range(n_buckets):
-            scores[i * bucket_size:(i + 1) * bucket_size, i * bucket_size:(i + 1) * bucket_size] = a[i] @ b[i].transpose(1, 0)
+        node_max = None
+        node_idx = None
+        stop = False
+        for i in range(num_batches):
+            start = i * batch_size
+            end = min((i + 1) * batch_size, n_padded)
+            scores_batch = torch.full((end - start, end - start), -math.inf, device=metric.device)
+            n_buckets_batch = (end - start) // bucket_size
+            # Compute dot product similarity within each bucket
+            for j in range(n_buckets_batch):
+                scores_batch[j * bucket_size:(j + 1) * bucket_size, j * bucket_size:(j + 1) * bucket_size] = a[j] @ b[j].transpose(1, 0)
+            if end > n:
+                n = n-start
+                scores_batch = scores_batch[:n, :n]
+                stop = True
+            if node_max is None:
+                node_max, node_idx = scores_batch.max(dim=-1)
+            else:
+                node_max_batch, node_idx_batch = scores_batch.max(dim=-1)
+                node_max = torch.cat([node_max, node_max_batch], dim=0)
+                node_idx = torch.cat([node_idx, node_idx_batch], dim=0)
+            if stop:
+                break
 
-        # Trim the padding
-        scores = scores[:n, :n]
-
-        node_max, node_idx = scores.max(dim=-1)
         edge_idx = node_max.argsort(dim=-1, descending=True)[..., None]
-
-        unm_idx = edge_idx[..., r:, :]  # Unmerged Tokens
-        src_idx = edge_idx[..., :r, :]  # Merged Tokens
+        src_idx = edge_idx # Merged Tokens
         dst_idx = node_idx[..., None].gather(dim=-2, index=src_idx)
 
     def merge(x: torch.Tensor, mode="mean") -> torch.Tensor:
         src, dst = x[..., ::2, :], x[..., 1::2, :]
         t1, c = src.shape
-        unm = src.gather(dim=-2, index=unm_idx.expand(t1 - r, c))
-        src = src.gather(dim=-2, index=src_idx.expand(r, c))
-        dst = dst.scatter_reduce(-2, dst_idx.expand(r, c), src, reduce=mode)
-        return torch.cat([unm, dst], dim=0)
+        src = src.gather(dim=-2, index=src_idx.expand(t1, c))
+        dst = dst.scatter_reduce(-2, dst_idx.expand(t1, c), src, reduce=mode)
+        return dst
 
-    def unmerge(x: torch.Tensor) -> torch.Tensor:
-        unm_len = unm_idx.shape[1]
-        unm, dst = x[..., :unm_len, :], x[..., unm_len:, :]
-        n, _, c = unm.shape
-
-        src = dst.gather(dim=-2, index=dst_idx.expand(n, r, c))
-
-        out = torch.zeros(n, metric.shape[1], c, device=x.device, dtype=x.dtype)
-
-        out[..., 1::2, :] = dst
-        out.scatter_(dim=-2, index=(2 * unm_idx).expand(n, unm_len, c), src=unm)
-        out.scatter_(dim=-2, index=(2 * src_idx).expand(n, r, c), src=src)
-
-        return out
-
-    return merge, unmerge
+    return merge
 
 def merge_wavg(
     merge: Callable, x: torch.Tensor, size: torch.Tensor = None, mode: str = "sum"
